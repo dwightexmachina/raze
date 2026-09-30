@@ -18,9 +18,18 @@ export interface TrackSample {
 
 interface BoostZone { from: number; to: number }
 
+export interface SegmentRange {
+  index: number;
+  kind: string;
+  label: string;
+  from: number;
+  to: number;
+}
+
 export class Track {
   readonly samples: TrackSample[] = [];
   readonly spec: TrackSpec;
+  readonly segmentRanges: SegmentRange[] = [];
   private boostZones: BoostZone[] = [];
 
   constructor(spec: TrackSpec) {
@@ -35,12 +44,20 @@ export class Track {
     const raw: Array<{ x: number; y: number; z: number; roll: number; yaw: number; s: number; surfaced: boolean }> = [];
     raw.push({ x, y, z, roll, yaw, s, surfaced: true });
 
-    for (const seg of spec.segments) {
+    for (let si = 0; si < spec.segments.length; si++) {
+      const seg = spec.segments[si];
       const rollStart = roll;
       const rollTarget = seg.kind === 'gap' ? roll : ((seg as { roll?: number }).roll ?? 0);
       const length = seg.kind === 'arc'
         ? Math.abs(THREE.MathUtils.degToRad(seg.angle)) * seg.radius
         : seg.length;
+      this.segmentRanges.push({
+        index: si,
+        kind: seg.kind,
+        label: seg.label ?? seg.kind,
+        from: s,
+        to: s + length,
+      });
       const n = Math.max(2, Math.ceil(length / DS));
       const y0 = y;
 
@@ -110,6 +127,13 @@ export class Track {
       if (d < bestD) { bestD = d; best = i; }
     }
     return { idx: best, dist: Math.sqrt(bestD) };
+  }
+
+  segmentAt(s: number): SegmentRange {
+    for (const r of this.segmentRanges) {
+      if (s >= r.from && s < r.to) return r;
+    }
+    return this.segmentRanges[this.segmentRanges.length - 1];
   }
 
   isOnBoost(s: number, lateral: number): boolean {

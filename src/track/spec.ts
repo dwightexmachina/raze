@@ -9,12 +9,13 @@
  * Arc angle sign: positive = left turn. Roll sign: positive raises the
  * right edge (so a right-hand banked turn wants negative roll).
  */
-export type Segment =
+export type Segment = (
   | { kind: 'straight'; length: number; roll?: number }
   | { kind: 'arc'; radius: number; angle: number; roll?: number }
   | { kind: 'hill'; length: number; height: number }
   | { kind: 'ramp'; length: number; rise: number }
-  | { kind: 'gap'; length: number };
+  | { kind: 'gap'; length: number }
+) & { label?: string };
 
 export type Attachment =
   | { kind: 'boost'; at: number; length: number }
@@ -41,25 +42,25 @@ export const GAUNTLET_PLUS: TrackSpec = {
   start: 12,
   finish: 753,
   segments: [
-    { kind: 'straight', length: 80 },                    //   0- 80 start straight
-    { kind: 'hill', length: 40, height: 2.5 },           //  80-120 crest
-    { kind: 'hill', length: 30, height: -1.5 },          // 120-150 dip
-    { kind: 'straight', length: 30 },                    // 150-180
-    { kind: 'arc', radius: 110, angle: 45 },             // 180-266 sweeper L
-    { kind: 'straight', length: 20 },                    // 266-286
-    { kind: 'arc', radius: 90, angle: -60, roll: -28 },  // 286-380 banked sweeper R
-    { kind: 'straight', length: 30 },                    // 380-410 roll eases out
-    { kind: 'arc', radius: 70, angle: 22 },              // 410-437 chicane L
-    { kind: 'arc', radius: 70, angle: -22 },             // 437-464 chicane R
-    { kind: 'straight', length: 40 },                    // 464-504
-    { kind: 'ramp', length: 18, rise: 3 },               // 504-522 launch ramp
-    { kind: 'gap', length: 14 },                         // 522-536 void gap
-    { kind: 'straight', length: 60 },                    // 536-596 landing + rail
-    { kind: 'straight', length: 50 },                    // 596-646 pylon slalom
-    { kind: 'straight', length: 25 },                    // 646-671 pinch gate
-    { kind: 'ramp', length: 22, rise: 4.5 },             // 671-693 big air
-    { kind: 'gap', length: 20 },                         // 693-713 void gap
-    { kind: 'straight', length: 80 },                    // 713-793 landing + finish
+    { kind: 'straight', length: 80, label: 'start straight' },        //   0- 80
+    { kind: 'hill', length: 40, height: 2.5, label: 'crest' },        //  80-120
+    { kind: 'hill', length: 30, height: -1.5, label: 'dip' },         // 120-150
+    { kind: 'straight', length: 30, label: 'approach' },              // 150-180
+    { kind: 'arc', radius: 110, angle: 45, label: 'sweeper L' },      // 180-266
+    { kind: 'straight', length: 20, label: 'link' },                  // 266-286
+    { kind: 'arc', radius: 90, angle: -60, roll: -28, label: 'banked sweeper R' }, // 286-380
+    { kind: 'straight', length: 30, label: 'roll-out' },              // 380-410
+    { kind: 'arc', radius: 70, angle: 22, label: 'chicane L' },       // 410-437
+    { kind: 'arc', radius: 70, angle: -22, label: 'chicane R' },      // 437-464
+    { kind: 'straight', length: 40, label: 'run-up' },                // 464-504
+    { kind: 'ramp', length: 18, rise: 3, label: 'launch ramp' },      // 504-522
+    { kind: 'gap', length: 14, label: 'void gap 1' },                 // 522-536
+    { kind: 'straight', length: 60, label: 'landing + rail' },        // 536-596
+    { kind: 'straight', length: 50, label: 'pylon slalom' },          // 596-646
+    { kind: 'straight', length: 25, label: 'pinch gate' },            // 646-671
+    { kind: 'ramp', length: 22, rise: 4.5, label: 'big air' },        // 671-693
+    { kind: 'gap', length: 20, label: 'void gap 2' },                 // 693-713
+    { kind: 'straight', length: 80, label: 'finish straight' },       // 713-793
   ],
   attachments: [
     { kind: 'boost', at: 50, length: 10 },

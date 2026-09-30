@@ -48,6 +48,15 @@ async function boot(): Promise<void> {
   let lastMs: number | null = null;
   let bestMs: number | null = null;
   let onBoostPad = false;
+  const riderTrackInfo = {
+    s: 0,             // arclength along the track, meters
+    segment: '-',     // named segment at that arclength
+    lateral: 0,       // signed offset from centerline (+ = right)
+    aboveDeck: 0,     // height above the deck surface along its normal
+    distToTrack: 0,   // distance to nearest centerline sample
+    offTrack: false,
+    checkpointS: 0,
+  };
 
   function spawnAt(s: number): void {
     const f = track.frameAt(s);
@@ -83,9 +92,20 @@ async function boot(): Promise<void> {
       // boost pad trigger
       const lateral = pos.clone().sub(smp.pos).dot(smp.right);
       onBoostPad = track.isOnBoost(smp.s, lateral);
+
+      const seg = track.segmentAt(smp.s);
+      riderTrackInfo.s = Math.round(smp.s * 10) / 10;
+      riderTrackInfo.segment = `${seg.label} [#${seg.index} ${seg.kind} ${Math.round(seg.from)}-${Math.round(seg.to)}m]`;
+      riderTrackInfo.lateral = Math.round(lateral * 10) / 10;
+      riderTrackInfo.aboveDeck = Math.round(pos.clone().sub(smp.pos).dot(smp.up) * 10) / 10;
+      riderTrackInfo.distToTrack = Math.round(near.dist * 10) / 10;
+      riderTrackInfo.offTrack = false;
     } else {
       onBoostPad = false;
+      riderTrackInfo.offTrack = true;
+      riderTrackInfo.distToTrack = Math.round(near.dist * 10) / 10;
     }
+    riderTrackInfo.checkpointS = Math.round(checkpointS * 10) / 10;
     // fell into the void → back to the last checkpoint
     if (pos.y < track.spec.baseY - 10) {
       spawnAt(Math.max(SPAWN_S, checkpointS - 4));
@@ -152,7 +172,7 @@ async function boot(): Promise<void> {
   const cammetaEl = document.getElementById('cammeta')!;
   const copyBtn = document.getElementById('copycam') as HTMLButtonElement;
   copyBtn.addEventListener('click', async () => {
-    const meta = chase.meta(rider.position, rider.speed);
+    const meta = { ...chase.meta(rider.position, rider.speed), track: { ...riderTrackInfo } };
     try {
       await navigator.clipboard.writeText(JSON.stringify(meta, null, 2));
       copyBtn.textContent = 'COPIED ✓';
@@ -183,7 +203,10 @@ async function boot(): Promise<void> {
       `fov     <b>${m.fov.toFixed(1)}°</b>\n` +
       `cam     <b>${v3(m.cameraPos)}</b>\n` +
       `look    <b>${v3(m.lookTarget)}</b>\n` +
-      `rider   <b>${v3(m.riderPos)}</b>`;
+      `rider   <b>${v3(m.riderPos)}</b>\n` +
+      `seg     <b>${riderTrackInfo.offTrack ? 'OFF TRACK' : riderTrackInfo.segment.split(' [')[0]}</b>\n` +
+      `s / lat <b>${riderTrackInfo.s.toFixed(1)} / ${riderTrackInfo.lateral > 0 ? '+' : ''}${riderTrackInfo.lateral.toFixed(1)}</b>\n` +
+      `deck    <b>${riderTrackInfo.aboveDeck > 0 ? '+' : ''}${riderTrackInfo.aboveDeck.toFixed(1)}</b>`;
   }
 
   // ---- HUD ----
