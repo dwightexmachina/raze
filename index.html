@@ -63,6 +63,23 @@
     #copycam:hover { background: #7df9ff; }
     #copycam:focus-visible { outline: 2px solid #ff2e88; outline-offset: 2px; }
     #copycam.done { background: #ff2e88; color: #edeef4; }
+    #paused {
+      position: fixed; inset: 0;
+      display: none; align-items: center; justify-content: center;
+      background: rgba(13, 5, 36, 0.45);
+      pointer-events: none; user-select: none;
+    }
+    #paused.on { display: flex; }
+    #paused span {
+      font-family: "Futura-CondensedExtraBold", "AvenirNextCondensed-Heavy", "Arial Narrow", Impact, sans-serif;
+      font-size: 64px; letter-spacing: 0.22em; color: #edeef4;
+      text-shadow: 0 0 24px rgba(0, 240, 255, 0.8);
+    }
+    #paused small {
+      display: block; text-align: center;
+      font-family: "SF Mono", ui-monospace, Menlo, monospace;
+      font-size: 12px; letter-spacing: 0.24em; color: #9ba0b4; margin-top: 6px;
+    }
   </style>
 </head>
 <body>
@@ -76,8 +93,10 @@
     <b>W/S</b> thrust · <b>A/D</b> carve<br />
     <b>SHIFT</b> boost · <b>SPACE</b> jump<br />
     <b>DRAG</b> orbit · <b>WHEEL</b> zoom<br />
-    <b>V</b> cam mode · <b>C</b> reset cam · <b>R</b> reset rider
+    <b>V</b> cam mode · <b>C</b> reset cam<br />
+    <b>P</b> pause · <b>R</b> reset rider
   </div>
+  <div id="paused"><div><span>PAUSED</span><small>P TO RESUME · CAMERA STILL LIVE</small></div></div>
   <div id="campanel">
     <h4>CAMERA</h4>
     <pre id="cammeta">--</pre>

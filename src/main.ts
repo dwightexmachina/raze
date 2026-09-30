@@ -160,9 +160,24 @@ async function boot(): Promise<void> {
     e.preventDefault();
     chase.zoomBy(e.deltaY);
   }, { passive: false });
+  // ---- pause (physics + timer freeze; rendering and camera stay live) ----
+  let paused = false;
+  let pauseStart = 0;
+  const pausedEl = document.getElementById('paused')!;
+  function togglePause(): void {
+    paused = !paused;
+    pausedEl.classList.toggle('on', paused);
+    if (paused) {
+      pauseStart = performance.now();
+    } else if (runStart !== null) {
+      runStart += performance.now() - pauseStart; // paused time doesn't count
+    }
+  }
+
   window.addEventListener('keydown', (e) => {
     if (e.code === 'KeyC') chase.resetOffsets();
     if (e.code === 'KeyV') chase.cycleMode();
+    if (e.code === 'KeyP') togglePause();
   });
 
   // debug handle for tuning from the console
@@ -227,14 +242,18 @@ async function boot(): Promise<void> {
   function frame(now: number): void {
     const dt = Math.min((now - last) / 1000, 0.1);
     last = now;
-    accumulator += dt;
 
-    trackLogic();
-    while (accumulator >= FIXED_DT) {
-      rider.step(input, onBoostPad);
-      world.timestep = FIXED_DT;
-      world.step();
-      accumulator -= FIXED_DT;
+    if (!paused) {
+      accumulator += dt;
+      trackLogic();
+      while (accumulator >= FIXED_DT) {
+        rider.step(input, onBoostPad);
+        world.timestep = FIXED_DT;
+        world.step();
+        accumulator -= FIXED_DT;
+      }
+    } else {
+      accumulator = 0;
     }
 
     rider.syncVisual(input);
@@ -247,7 +266,8 @@ async function boot(): Promise<void> {
 
     speedEl.textContent = String(Math.round(rider.speed * 3.6));
     if (runStart !== null) {
-      timeEl.textContent = `TIME ${fmt(performance.now() - runStart)}${bestMs !== null ? '  BEST ' + fmt(bestMs) : ''}`;
+      const clock = paused ? pauseStart : performance.now();
+      timeEl.textContent = `TIME ${fmt(clock - runStart)}${bestMs !== null ? '  BEST ' + fmt(bestMs) : ''}`;
     } else if (lastMs !== null) {
       timeEl.textContent = `RUN ${fmt(lastMs)}  BEST ${fmt(bestMs ?? lastMs)}`;
     } else {
