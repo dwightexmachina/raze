@@ -12,6 +12,9 @@ const BOARD_HALF_WIDTH = 0.38;
 // Hover tuning
 const HOVER_REST = 0.9;          // target ride height per corner ray
 const HOVER_RAY_LENGTH = 2.2;
+// rays start this far above the board so a nose that dips slightly into a
+// rising deck still sees the surface and gets pushed back out
+const RAY_LIFT = 1.2;
 const SPRING_K = 900;            // N/m per corner
 const SPRING_DAMP = 130;
 const THRUST = 2600;
@@ -121,7 +124,8 @@ export class Rider {
       RAPIER.RigidBodyDesc.dynamic()
         .setTranslation(0, 2.5, 20)
         .setAngularDamping(3.0)
-        .setLinearDamping(0.12),
+        .setLinearDamping(0.12)
+        .setCcdEnabled(true), // don't tunnel through the thin track shell
     );
     world.createCollider(
       RAPIER.ColliderDesc.cuboid(BOARD_HALF_WIDTH, 0.12, BOARD_HALF_LENGTH)
@@ -131,18 +135,20 @@ export class Rider {
     );
   }
 
+  /** Teleport the rider (spawn/respawn) facing `yaw`, velocities zeroed. */
+  setPose(pos: THREE.Vector3, yaw: number): void {
+    const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+    this.body.setTranslation({ x: pos.x, y: pos.y, z: pos.z }, true);
+    this.body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
+    this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+  }
+
   /** One fixed physics step's worth of control + hover forces. */
-  step(input: Input): void {
+  step(input: Input, padBoost = false): void {
     const body = this.body;
     body.resetForces(true);
     body.resetTorques(true);
-
-    if (input.consumeReset()) {
-      body.setTranslation({ x: 0, y: 2.5, z: 20 }, true);
-      body.setLinvel({ x: 0, y: 0, z: 0 }, true);
-      body.setAngvel({ x: 0, y: 0, z: 0 }, true);
-      body.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
-    }
 
     const rot = body.rotation();
     const q = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
@@ -163,11 +169,11 @@ export class Rider {
     const rayDir = { x: 0, y: -1, z: 0 };
     for (const [dz, dx] of CORNERS) {
       const local = new THREE.Vector3(dx, 0, dz).applyQuaternion(q);
-      const origin = { x: pos.x + local.x, y: pos.y + local.y, z: pos.z + local.z };
+      const origin = { x: pos.x + local.x, y: pos.y + local.y + RAY_LIFT, z: pos.z + local.z };
       const ray = new this.RAPIER.Ray(origin, rayDir);
-      const hit = this.world.castRay(ray, HOVER_RAY_LENGTH, true, undefined, undefined, undefined, body);
+      const hit = this.world.castRay(ray, HOVER_RAY_LENGTH + RAY_LIFT, true, undefined, undefined, undefined, body);
       if (hit) {
-        const dist = hit.timeOfImpact;
+        const dist = hit.timeOfImpact - RAY_LIFT; // distance from the board itself
         if (dist < HOVER_RAY_LENGTH) {
           this.grounded = this.grounded || dist < HOVER_REST * 1.4;
           const compression = HOVER_REST - dist;
@@ -178,7 +184,8 @@ export class Rider {
           );
           const springForce = SPRING_K * compression - SPRING_DAMP * cornerVel.y;
           if (springForce > 0) {
-            body.addForceAtPoint({ x: 0, y: springForce, z: 0 }, origin, true);
+            const at = { x: pos.x + local.x, y: pos.y + local.y, z: pos.z + local.z };
+            body.addForceAtPoint({ x: 0, y: springForce, z: 0 }, at, true);
           }
         }
       }
@@ -188,6 +195,12 @@ export class Rider {
     const thrustMag = THRUST * (input.boost ? BOOST_MULT : 1);
     if (input.thrust !== 0 && this.grounded) {
       const f = forward.clone().multiplyScalar(thrustMag * input.thrust);
+      body.addForce({ x: f.x, y: 0, z: f.z }, true);
+    }
+
+    // ---- boost pad: free speed regardless of input ----
+    if (padBoost && this.grounded) {
+      const f = forward.clone().multiplyScalar(THRUST * 1.4);
       body.addForce({ x: f.x, y: 0, z: f.z }, true);
     }
 

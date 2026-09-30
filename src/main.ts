@@ -9,7 +9,8 @@ import { Input } from './input';
 import { makeChromeMatcap } from './matcap';
 import { makeSky } from './sky';
 import { makeGrid, updateGrid } from './grid';
-import { buildPark } from './park';
+import { buildTrack, updateTrack } from './track/builder';
+import { GAUNTLET_PLUS } from './track/spec';
 import { Rider } from './rider';
 import { ChaseCamera } from './camera';
 
@@ -32,11 +33,71 @@ async function boot(): Promise<void> {
   scene.add(makeSky());
   const grid = makeGrid();
   scene.add(grid);
-  buildPark(scene, world, RAPIER);
+  const { track, mesh: trackMesh } = buildTrack(scene, world, RAPIER, GAUNTLET_PLUS);
 
   const matcap = makeChromeMatcap();
   const input = new Input();
   const rider = new Rider(scene, world, RAPIER, matcap);
+
+  // ---- track progress, respawn, timing ----
+  const SPAWN_S = 4;
+  let nearIdx = 0;
+  let checkpointS = SPAWN_S;
+  let progressS = 0;
+  let runStart: number | null = null;
+  let lastMs: number | null = null;
+  let bestMs: number | null = null;
+  let onBoostPad = false;
+
+  function spawnAt(s: number): void {
+    const f = track.frameAt(s);
+    const yaw = Math.atan2(-f.tangent.x, -f.tangent.z);
+    rider.setPose(f.pos.clone().addScaledVector(f.up, 1.8), yaw);
+    nearIdx = 0;
+    progressS = s;
+  }
+  spawnAt(SPAWN_S);
+
+  function trackLogic(): void {
+    const pos = rider.position;
+    const near = track.nearest(pos, nearIdx);
+    const smp = track.samples[near.idx];
+    if (near.dist < track.spec.width * 1.5) {
+      nearIdx = near.idx;
+      const prevS = progressS;
+      progressS = smp.s;
+      // checkpoint only while over surfaced deck, close to it
+      if (smp.surfaced && pos.y > smp.pos.y - 1 && near.dist < track.spec.width * 0.7) {
+        checkpointS = smp.s;
+      }
+      // timing gates
+      if (prevS < track.spec.start && progressS >= track.spec.start) {
+        runStart = performance.now();
+        lastMs = null;
+      }
+      if (runStart !== null && prevS < track.spec.finish && progressS >= track.spec.finish) {
+        lastMs = performance.now() - runStart;
+        if (bestMs === null || lastMs < bestMs) bestMs = lastMs;
+        runStart = null;
+      }
+      // boost pad trigger
+      const lateral = pos.clone().sub(smp.pos).dot(smp.right);
+      onBoostPad = track.isOnBoost(smp.s, lateral);
+    } else {
+      onBoostPad = false;
+    }
+    // fell into the void → back to the last checkpoint
+    if (pos.y < track.spec.baseY - 10) {
+      spawnAt(Math.max(SPAWN_S, checkpointS - 4));
+    }
+    // manual reset → back to the start line
+    if (input.consumeReset()) {
+      spawnAt(SPAWN_S);
+      checkpointS = SPAWN_S;
+      runStart = null;
+      lastMs = null;
+    }
+  }
 
   // ---- post stack: bloom is the whole Gridfire look ----
   const composer = new EffectComposer(renderer);
@@ -85,7 +146,7 @@ async function boot(): Promise<void> {
   });
 
   // debug handle for tuning from the console
-  (window as unknown as { __raze: object }).__raze = { chase, rider };
+  (window as unknown as { __raze: object }).__raze = { chase, rider, track };
 
   // ---- camera metadata panel + clipboard copy ----
   const cammetaEl = document.getElementById('cammeta')!;
@@ -128,8 +189,13 @@ async function boot(): Promise<void> {
   // ---- HUD ----
   const speedEl = document.getElementById('speed')!;
   const fpsEl = document.getElementById('fps')!;
+  const timeEl = document.getElementById('time')!;
   let frames = 0;
   let fpsClock = 0;
+
+  function fmt(ms: number): string {
+    return (ms / 1000).toFixed(2);
+  }
 
   // ---- fixed-timestep loop: physics at 60 Hz, render at rAF ----
   let last = performance.now();
@@ -140,8 +206,9 @@ async function boot(): Promise<void> {
     last = now;
     accumulator += dt;
 
+    trackLogic();
     while (accumulator >= FIXED_DT) {
-      rider.step(input);
+      rider.step(input, onBoostPad);
       world.timestep = FIXED_DT;
       world.step();
       accumulator -= FIXED_DT;
@@ -150,11 +217,19 @@ async function boot(): Promise<void> {
     rider.syncVisual(input);
     chase.update(dt, rider.position, rider.heading, rider.speed);
     updateGrid(grid, chase.camera.position);
+    updateTrack(trackMesh, chase.camera.position);
     updateMetaPanel(dt);
 
     composer.render();
 
     speedEl.textContent = String(Math.round(rider.speed * 3.6));
+    if (runStart !== null) {
+      timeEl.textContent = `TIME ${fmt(performance.now() - runStart)}${bestMs !== null ? '  BEST ' + fmt(bestMs) : ''}`;
+    } else if (lastMs !== null) {
+      timeEl.textContent = `RUN ${fmt(lastMs)}  BEST ${fmt(bestMs ?? lastMs)}`;
+    } else {
+      timeEl.textContent = bestMs !== null ? `BEST ${fmt(bestMs)}` : 'CROSS THE START LINE';
+    }
     frames += 1;
     fpsClock += dt;
     if (fpsClock >= 0.5) {
