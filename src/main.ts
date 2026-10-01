@@ -235,6 +235,9 @@ async function boot(): Promise<void> {
   const speedEl = document.getElementById('speed')!;
   const fpsEl = document.getElementById('fps')!;
   const timeEl = document.getElementById('time')!;
+  const boostFill = document.getElementById('boostfill')!;
+  const trickEl = document.getElementById('trick')!;
+  let trickTimer: ReturnType<typeof setTimeout> | undefined;
   let frames = 0;
   let fpsClock = 0;
 
@@ -272,6 +275,17 @@ async function boot(): Promise<void> {
     composer.render();
 
     speedEl.textContent = String(Math.round(rider.speed * 3.6));
+    boostFill.style.width = `${rider.meter}%`;
+    boostFill.classList.toggle('boosting', rider.boosting);
+
+    const trick = rider.consumeTrick();
+    if (trick) {
+      const prefix = trick.quality === 'CLEAN' ? '' : trick.quality + ' ';
+      trickEl.innerHTML = `${prefix}${trick.label}${trick.gain > 0 ? `<small>+${trick.gain} BOOST</small>` : ''}`;
+      trickEl.className = 'show' + (trick.quality === 'SKETCHY' ? ' sketchy' : trick.quality === 'BAIL' ? ' bail' : '');
+      clearTimeout(trickTimer);
+      trickTimer = setTimeout(() => { trickEl.className = ''; }, 1500);
+    }
     if (runStart !== null) {
       const clock = paused ? pauseStart : performance.now();
       timeEl.textContent = `TIME ${fmt(clock - runStart)}${bestMs !== null ? '  BEST ' + fmt(bestMs) : ''}`;

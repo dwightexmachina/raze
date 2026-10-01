@@ -80,23 +80,54 @@
       font-family: "SF Mono", ui-monospace, Menlo, monospace;
       font-size: 12px; letter-spacing: 0.24em; color: #9ba0b4; margin-top: 6px;
     }
+    #boostwrap {
+      width: 190px; height: 10px; margin: 6px 0 4px;
+      border: 1px solid #262a38; border-radius: 3px;
+      background: rgba(19, 21, 29, 0.7); overflow: hidden;
+    }
+    #boostfill {
+      height: 100%; width: 50%;
+      background: #00f0ff; border-radius: 2px;
+      transition: width 0.1s linear;
+      box-shadow: 0 0 8px rgba(0, 240, 255, 0.7);
+    }
+    #boostfill.boosting { background: #ff2e88; box-shadow: 0 0 10px rgba(255, 46, 136, 0.8); }
+    #trick {
+      position: fixed; left: 50%; top: 24%;
+      transform: translateX(-50%) scale(0.9);
+      font-family: "Futura-CondensedExtraBold", "AvenirNextCondensed-Heavy", "Arial Narrow", Impact, sans-serif;
+      font-size: 44px; letter-spacing: 0.14em; color: #00f0ff;
+      text-shadow: 0 0 22px rgba(0, 240, 255, 0.8);
+      opacity: 0; transition: opacity 0.25s, transform 0.25s;
+      pointer-events: none; user-select: none; white-space: nowrap;
+    }
+    #trick.show { opacity: 1; transform: translateX(-50%) scale(1); }
+    #trick.sketchy { color: #ffb800; text-shadow: 0 0 22px rgba(255, 184, 0, 0.8); }
+    #trick.bail { color: #ff2e88; text-shadow: 0 0 22px rgba(255, 46, 136, 0.8); }
+    #trick small {
+      display: block; text-align: center;
+      font-family: "SF Mono", ui-monospace, Menlo, monospace;
+      font-size: 15px; letter-spacing: 0.3em; color: #edeef4;
+    }
   </style>
 </head>
 <body>
   <div id="title">RAZE<small>GRIDFIRE SANDBOX 0.1</small></div>
   <div id="hud">
     <div class="speed"><span id="speed">0</span><span> KM/H</span></div>
+    <div id="boostwrap"><div id="boostfill"></div></div>
     <div id="time">--</div>
     <div id="fps">-- fps</div>
   </div>
   <div id="help">
-    <b>W/S</b> thrust · <b>A/D</b> carve<br />
-    <b>SHIFT</b> boost · <b>SPACE</b> jump<br />
+    <b>W/S</b> thrust · <b>A/D</b> carve &amp; spin<br />
+    <b>SHIFT</b> boost (meter) · <b>SPACE</b> jump / hold = grab<br />
     <b>DRAG</b> orbit · <b>WHEEL</b> zoom<br />
     <b>V</b> cam mode · <b>C</b> reset cam<br />
     <b>P</b> pause · <b>R</b> reset rider
   </div>
   <div id="paused"><div><span>PAUSED</span><small>P TO RESUME · CAMERA STILL LIVE</small></div></div>
+  <div id="trick"></div>
   <div id="campanel">
     <h4>CAMERA</h4>
     <pre id="cammeta">--</pre>

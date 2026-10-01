@@ -23,10 +23,20 @@ const SPRING_DAMP = 130;
 // hard landings are absorbed instead of slamming the slab into the deck
 const SPRING_PROG = 3.5;
 const THRUST = 2600;
-const BOOST_MULT = 1.9;
 // quadratic aero drag on planar velocity → real terminal speed:
-// ~160 km/h flat-out, ~215 km/h boosted
+// ~160 km/h flat-out, ~230 km/h boosted
 const DRAG_K = 1.35;
+
+// Boost economy: SHIFT spends the meter, tricks and grinding fill it
+const BOOST_FORCE = 3000;        // N along the deck while boosting
+const BOOST_DRAIN = 30;          // meter/s while boosting
+const METER_GRIND = 9;           // meter/s while grinding
+const GRAB_RATE = 18;            // meter/s of grab airtime (on clean landing)
+const SPIN_POINTS: Array<[number, number]> = [
+  [900, 100], [720, 70], [540, 45], [360, 26], [180, 12],
+];
+const AIR_SPIN_RATE = 9.5;       // rad/s target while steering in air (~515°/s effective)
+const AIR_SPIN_SNAP = 0.45;      // per-step blend toward the target rate
 const YAW_TORQUE = 950;
 const LATERAL_GRIP = 9.0;        // 1/s — how fast sideways velocity dies
 const UPRIGHT_K = 620;
@@ -50,11 +60,20 @@ const CORNERS: Array<[number, number]> = [
   [BOARD_HALF_LENGTH * 0.75, BOARD_HALF_WIDTH],
 ];
 
+export interface TrickEvent {
+  label: string;
+  gain: number;
+  quality: 'CLEAN' | 'SKETCHY' | 'BAIL';
+}
+
 export class Rider {
   readonly group = new THREE.Group();
   readonly body: RAPIER_API.RigidBody;
   grounded = false;
   speed = 0;
+  /** Boost meter, 0-100. Starts half-charged so boost is discoverable. */
+  meter = 50;
+  boosting = false;
 
   private world: RAPIER_API.World;
   private RAPIER: Rapier;
@@ -68,6 +87,14 @@ export class Rider {
   private grindDir = 1;
   private grindSpeed = 0;
   private grindCool = 0;
+
+  // air/trick state
+  private wasGrounded = true;
+  private airTime = 0;
+  private airSpin = 0;      // accumulated yaw while airborne, radians
+  private grabTime = 0;
+  private grabActive = false;
+  private pendingTrick: TrickEvent | null = null;
 
   constructor(
     scene: THREE.Scene,
@@ -186,6 +213,13 @@ export class Rider {
     return this.grindRail !== null;
   }
 
+  /** One-shot trick result for the HUD toast. */
+  consumeTrick(): TrickEvent | null {
+    const t = this.pendingTrick;
+    this.pendingTrick = null;
+    return t;
+  }
+
   /** Teleport the rider (spawn/respawn) facing `yaw`, velocities zeroed. */
   setPose(pos: THREE.Vector3, yaw: number): void {
     this.grindRail = null;
@@ -269,10 +303,19 @@ export class Rider {
     const surfaceUp = hits > 0 ? normalSum.normalize() : new THREE.Vector3(0, 1, 0);
 
     // ---- thrust along the deck plane (climbs hills instead of plowing) ----
-    const thrustMag = THRUST * (input.boost ? BOOST_MULT : 1);
     if (input.thrust !== 0 && this.grounded) {
-      const f = forward.clone().multiplyScalar(thrustMag * input.thrust);
+      const f = forward.clone().multiplyScalar(THRUST * input.thrust);
       body.addForce({ x: f.x, y: f.y, z: f.z }, true);
+    }
+
+    // ---- boost: spends the meter, earned back by tricks and grinding ----
+    this.boosting = input.boost && this.meter > 0;
+    if (this.boosting) {
+      this.meter = Math.max(0, this.meter - BOOST_DRAIN * FIXED_DT);
+      if (this.grounded) {
+        const f = forward.clone().multiplyScalar(BOOST_FORCE);
+        body.addForce({ x: f.x, y: f.y, z: f.z }, true);
+      }
     }
 
     // ---- boost pad: free speed regardless of input ----
@@ -293,11 +336,21 @@ export class Rider {
     }
 
     // ---- carve steering: torque + speed-scaled effectiveness ----
-    if (input.steer !== 0) {
-      const authority = this.grounded ? 1 : 0.45; // some air control
-      // yaw around the BOARD's up axis, so carving works on walls and pipes
-      const tq = YAW_TORQUE * input.steer * authority;
-      body.addTorque({ x: up.x * tq, y: up.y * tq, z: up.z * tq }, true);
+    if (this.grounded) {
+      if (input.steer !== 0) {
+        // carve: yaw torque around the BOARD's up axis (works on walls/pipes)
+        const tq = YAW_TORQUE * input.steer;
+        body.addTorque({ x: up.x * tq, y: up.y * tq, z: up.z * tq }, true);
+      }
+    } else {
+      // air spin is rate-controlled, arcade-style: steer drives yaw rate
+      // toward ±AIR_SPIN_RATE, release snaps it back to zero — precise
+      // 360s instead of fighting the plank's inertia
+      const targetW = input.steer * AIR_SPIN_RATE;
+      const wUp = angvel.dot(up);
+      const newWUp = wUp + (targetW - wUp) * AIR_SPIN_SNAP;
+      const w = angvel.clone().addScaledVector(up, newWUp - wUp);
+      body.setAngvel({ x: w.x, y: w.y, z: w.z }, true);
     }
 
     // ---- lateral grip: carve, don't slide ----
@@ -325,7 +378,76 @@ export class Rider {
     }
     this.jumpHeld = input.jump;
 
+    // ---- air/trick accounting ----
+    this.grabActive = false;
+    if (!this.grounded) {
+      this.airTime += FIXED_DT;
+      this.airSpin += av.y * FIXED_DT;
+      if (input.jump && this.airTime > 0.15) {
+        this.grabTime += FIXED_DT;
+        this.grabActive = true;
+      }
+    } else if (!this.wasGrounded) {
+      this.settleAir(false, forward, v, av.y);
+    }
+    this.wasGrounded = this.grounded;
+
     this.trySnapToRail(v);
+  }
+
+  /** Judge and bank an air on landing (or on snapping to a rail). */
+  private settleAir(
+    ontoRail: boolean,
+    forward?: THREE.Vector3,
+    v?: THREE.Vector3,
+    spinRate = 0,
+  ): void {
+    if (this.airTime > 0.35) {
+      const deg = Math.abs(this.airSpin) * (180 / Math.PI);
+      const spins = Math.floor((deg + 60) / 180) * 180; // generous snap to 180s
+      let spinPts = 0;
+      for (const [d, pts] of SPIN_POINTS) {
+        if (spins >= d) { spinPts = pts; break; }
+      }
+      const grabPts = Math.round(this.grabTime * GRAB_RATE);
+
+      let quality: TrickEvent['quality'] = 'CLEAN';
+      if (!ontoRail && forward && v) {
+        const pv = new THREE.Vector3(v.x, 0, v.z);
+        if (pv.length() > 4) {
+          // |cos| → nose OR tail along travel counts (switch landings are legal)
+          const align = Math.abs(pv.normalize()
+            .dot(new THREE.Vector3(forward.x, 0, forward.z).normalize()));
+          if (align < Math.cos(1.2)) quality = 'BAIL';          // >~70° sideways
+          else if (align < Math.cos(0.6) || Math.abs(spinRate) > 3.2) quality = 'SKETCHY';
+        }
+      }
+
+      let gain = spinPts + grabPts;
+      if (quality === 'SKETCHY') gain = Math.round(gain * 0.5);
+      if (quality === 'BAIL') {
+        gain = 0;
+        const vv = this.body.linvel();
+        this.body.setLinvel({ x: vv.x * 0.55, y: vv.y, z: vv.z * 0.55 }, true);
+      }
+      this.meter = Math.min(100, this.meter + gain);
+
+      if (spins >= 180 || grabPts > 0 || quality !== 'CLEAN') {
+        const parts: string[] = [];
+        if (spins >= 180) parts.push(String(spins));
+        if (grabPts > 0) parts.push('GRAB');
+        if (ontoRail) parts.push('RAIL');
+        this.pendingTrick = {
+          label: parts.join(' + ') || 'LANDED',
+          gain,
+          quality,
+        };
+      }
+    }
+    this.airTime = 0;
+    this.airSpin = 0;
+    this.grabTime = 0;
+    this.grabActive = false;
   }
 
   /** Locked to a rail: ride the line, bleed a little speed, jump or run out. */
@@ -361,7 +483,9 @@ export class Rider {
     body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
 
     this.grounded = true;
+    this.wasGrounded = true;
     this.speed = this.grindSpeed;
+    this.meter = Math.min(100, this.meter + METER_GRIND * FIXED_DT);
   }
 
   private exitGrind(): void {
@@ -390,6 +514,7 @@ export class Rider {
       if (Math.abs(alongVel) < GRIND_MIN_SPEED) continue;
       if (Math.abs(alongVel) / Math.max(planar, 0.1) < GRIND_ALIGN) continue;
 
+      this.settleAir(true); // landing ON a rail is always a styled landing
       this.grindRail = r;
       this.grindDir = alongVel >= 0 ? 1 : -1;
       this.grindSpeed = Math.abs(alongVel);
@@ -405,9 +530,11 @@ export class Rider {
     this.group.position.set(pos.x, pos.y, pos.z);
     this.group.quaternion.set(rot.x, rot.y, rot.z, rot.w);
 
-    // cosmetic roll into the carve
+    // cosmetic roll into the carve, tuck pitch while grabbing
     const targetLean = input.steer * Math.min(this.speed / 30, 1) * 0.45;
     this.leanGroup.rotation.z += (targetLean - this.leanGroup.rotation.z) * 0.12;
+    const targetTuck = this.grabActive ? -0.32 : 0;
+    this.leanGroup.rotation.x += (targetTuck - this.leanGroup.rotation.x) * 0.15;
   }
 
   get position(): THREE.Vector3 {
