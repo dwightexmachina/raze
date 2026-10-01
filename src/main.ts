@@ -180,8 +180,8 @@ async function boot(): Promise<void> {
     if (e.code === 'KeyP') togglePause();
   });
 
-  // debug handle for tuning from the console
-  (window as unknown as { __raze: object }).__raze = { chase, rider, track };
+  // debug handle for tuning + headless stepping from the console
+  (window as unknown as { __raze: object }).__raze = { chase, rider, track, world, input };
 
   // ---- camera metadata panel + clipboard copy ----
   const cammetaEl = document.getElementById('cammeta')!;

@@ -43,9 +43,9 @@ export const GAUNTLET_PLUS: TrackSpec = {
   finish: 753,
   segments: [
     { kind: 'straight', length: 80, label: 'start straight' },        //   0- 80
-    { kind: 'hill', length: 40, height: 2.5, label: 'crest' },        //  80-120
-    { kind: 'hill', length: 30, height: -1.5, label: 'dip' },         // 120-150
-    { kind: 'straight', length: 30, label: 'approach' },              // 150-180
+    { kind: 'hill', length: 52, height: 2.5, label: 'crest' },        //  80-132 (eased for top speed)
+    { kind: 'hill', length: 34, height: -1.5, label: 'dip' },         // 132-166
+    { kind: 'straight', length: 14, label: 'approach' },              // 166-180
     { kind: 'arc', radius: 110, angle: 45, label: 'sweeper L' },      // 180-266
     { kind: 'straight', length: 20, label: 'link' },                  // 266-286
     { kind: 'arc', radius: 90, angle: -60, roll: -28, label: 'banked sweeper R' }, // 286-380

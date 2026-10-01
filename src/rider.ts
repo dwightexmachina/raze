@@ -17,8 +17,15 @@ const HOVER_RAY_LENGTH = 2.2;
 const RAY_LIFT = 1.2;
 const SPRING_K = 900;            // N/m per corner
 const SPRING_DAMP = 130;
+// progressive stiffening: spring force multiplies by (1 + PROG·ratio²) as
+// compression approaches bottom-out, so high-speed concave transitions and
+// hard landings are absorbed instead of slamming the slab into the deck
+const SPRING_PROG = 2.5;
 const THRUST = 2600;
 const BOOST_MULT = 1.9;
+// quadratic aero drag on planar velocity → real terminal speed:
+// ~160 km/h flat-out, ~215 km/h boosted
+const DRAG_K = 1.35;
 const YAW_TORQUE = 950;
 const LATERAL_GRIP = 9.0;        // 1/s — how fast sideways velocity dies
 const UPRIGHT_K = 620;
@@ -127,12 +134,28 @@ export class Rider {
         .setLinearDamping(0.12)
         .setCcdEnabled(true), // don't tunnel through the thin track shell
     );
+    // Rockered hull: a shorter main slab plus upswept nose/tail tips, so
+    // rising terrain meets an angled surface that deflects the board up
+    // instead of a square edge that acts as a brake (real boards have
+    // rocker for exactly this reason).
     world.createCollider(
-      RAPIER.ColliderDesc.cuboid(BOARD_HALF_WIDTH, 0.12, BOARD_HALF_LENGTH)
+      RAPIER.ColliderDesc.cuboid(BOARD_HALF_WIDTH, 0.1, BOARD_HALF_LENGTH * 0.8)
         .setDensity(60)
         .setFriction(0.1),
       this.body,
     );
+    const ROCKER = 0.38; // rad (~22°) tip upsweep — must out-angle any slope
+    for (const end of [-1, 1]) { // -1 = nose (-Z), +1 = tail
+      const qr = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -end * ROCKER);
+      world.createCollider(
+        RAPIER.ColliderDesc.cuboid(BOARD_HALF_WIDTH * 0.9, 0.08, 0.75)
+          .setTranslation(0, 0.26, end * (BOARD_HALF_LENGTH * 0.8 + 0.6))
+          .setRotation({ x: qr.x, y: qr.y, z: qr.z, w: qr.w })
+          .setDensity(30)
+          .setFriction(0.05),
+        this.body,
+      );
+    }
   }
 
   /** Teleport the rider (spawn/respawn) facing `yaw`, velocities zeroed. */
@@ -157,56 +180,82 @@ export class Rider {
     const v = new THREE.Vector3(vel.x, vel.y, vel.z);
     const mass = body.mass();
 
+    // Board frame — the whole model is SURFACE-RELATIVE, not world-vertical:
+    // rays cast along board-down, springs push along board-up, damping only
+    // fights along-normal velocity (so climbing a slope isn't punished),
+    // and thrust acts along the deck plane.
     const up = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
-    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
-    forward.y = 0;
-    if (forward.lengthSq() < 1e-6) forward.set(0, 0, -1);
-    forward.normalize();
-    const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).negate();
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(q).normalize();
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+    const av = body.angvel();
+    const angvel = new THREE.Vector3(av.x, av.y, av.z);
 
-    // ---- hover springs at four corners ----
+    // ---- hover springs at four corners, along the board normal ----
     this.grounded = false;
-    const rayDir = { x: 0, y: -1, z: 0 };
+    const rayDir = { x: -up.x, y: -up.y, z: -up.z };
+    const normalSum = new THREE.Vector3();
+    let hits = 0;
     for (const [dz, dx] of CORNERS) {
       const local = new THREE.Vector3(dx, 0, dz).applyQuaternion(q);
-      const origin = { x: pos.x + local.x, y: pos.y + local.y + RAY_LIFT, z: pos.z + local.z };
+      const origin = {
+        x: pos.x + local.x + up.x * RAY_LIFT,
+        y: pos.y + local.y + up.y * RAY_LIFT,
+        z: pos.z + local.z + up.z * RAY_LIFT,
+      };
       const ray = new this.RAPIER.Ray(origin, rayDir);
-      const hit = this.world.castRay(ray, HOVER_RAY_LENGTH + RAY_LIFT, true, undefined, undefined, undefined, body);
+      const hit = this.world.castRayAndGetNormal(
+        ray, HOVER_RAY_LENGTH + RAY_LIFT, true, undefined, undefined, undefined, body,
+      );
       if (hit) {
         const dist = hit.timeOfImpact - RAY_LIFT; // distance from the board itself
         if (dist < HOVER_RAY_LENGTH) {
           this.grounded = this.grounded || dist < HOVER_REST * 1.4;
+          const n = new THREE.Vector3(hit.normal.x, hit.normal.y, hit.normal.z);
+          if (n.dot(up) < 0) n.negate(); // trimesh backface
+          normalSum.add(n);
+          hits++;
           const compression = HOVER_REST - dist;
-          // velocity of this corner along the ray
-          const av = body.angvel();
-          const cornerVel = v.clone().add(
-            new THREE.Vector3(av.x, av.y, av.z).cross(local),
-          );
-          const springForce = SPRING_K * compression - SPRING_DAMP * cornerVel.y;
+          const cornerVel = v.clone().add(angvel.clone().cross(local));
+          const ratio = Math.max(0, compression / HOVER_REST);
+          const springForce =
+            SPRING_K * compression * (1 + SPRING_PROG * ratio * ratio) -
+            SPRING_DAMP * cornerVel.dot(up);
           if (springForce > 0) {
-            const at = { x: pos.x + local.x, y: pos.y + local.y, z: pos.z + local.z };
-            body.addForceAtPoint({ x: 0, y: springForce, z: 0 }, at, true);
+            body.addForceAtPoint(
+              { x: up.x * springForce, y: up.y * springForce, z: up.z * springForce },
+              { x: pos.x + local.x, y: pos.y + local.y, z: pos.z + local.z },
+              true,
+            );
           }
         }
       }
     }
+    const surfaceUp = hits > 0 ? normalSum.normalize() : new THREE.Vector3(0, 1, 0);
 
-    // ---- thrust ----
+    // ---- thrust along the deck plane (climbs hills instead of plowing) ----
     const thrustMag = THRUST * (input.boost ? BOOST_MULT : 1);
     if (input.thrust !== 0 && this.grounded) {
       const f = forward.clone().multiplyScalar(thrustMag * input.thrust);
-      body.addForce({ x: f.x, y: 0, z: f.z }, true);
+      body.addForce({ x: f.x, y: f.y, z: f.z }, true);
     }
 
     // ---- boost pad: free speed regardless of input ----
     if (padBoost && this.grounded) {
       const f = forward.clone().multiplyScalar(THRUST * 1.4);
-      body.addForce({ x: f.x, y: 0, z: f.z }, true);
+      body.addForce({ x: f.x, y: f.y, z: f.z }, true);
+    }
+
+    // ---- aero drag (planar only, so jump arcs stay crisp) ----
+    const planarSpeed = Math.hypot(v.x, v.z);
+    this.speed = planarSpeed;
+    if (planarSpeed > 0.5) {
+      body.addForce(
+        { x: -v.x * DRAG_K * planarSpeed, y: 0, z: -v.z * DRAG_K * planarSpeed },
+        true,
+      );
     }
 
     // ---- carve steering: torque + speed-scaled effectiveness ----
-    const planarSpeed = Math.hypot(v.x, v.z);
-    this.speed = planarSpeed;
     if (input.steer !== 0) {
       const authority = this.grounded ? 1 : 0.45; // some air control
       body.addTorque({ x: 0, y: YAW_TORQUE * input.steer * authority, z: 0 }, true);
@@ -216,19 +265,24 @@ export class Rider {
     if (this.grounded) {
       const latVel = right.dot(v);
       const gripForce = right.clone().multiplyScalar(-latVel * LATERAL_GRIP * mass);
-      body.addForce({ x: gripForce.x, y: 0, z: gripForce.z }, true);
+      body.addForce({ x: gripForce.x, y: gripForce.y, z: gripForce.z }, true);
     }
 
-    // ---- upright stabilization ----
-    const correction = new THREE.Vector3().crossVectors(up, new THREE.Vector3(0, 1, 0));
+    // ---- upright stabilization: align to the surface under the board
+    // (banks and slopes), or to world-up when airborne ----
+    const uprightTarget = this.grounded ? surfaceUp : new THREE.Vector3(0, 1, 0);
+    const correction = new THREE.Vector3().crossVectors(up, uprightTarget);
     body.addTorque(
-      { x: correction.x * UPRIGHT_K, y: 0, z: correction.z * UPRIGHT_K },
+      { x: correction.x * UPRIGHT_K, y: correction.y * UPRIGHT_K, z: correction.z * UPRIGHT_K },
       true,
     );
 
-    // ---- jump (edge-triggered) ----
+    // ---- jump (edge-triggered), along the board normal ----
     if (input.jump && !this.jumpHeld && this.grounded) {
-      body.applyImpulse({ x: 0, y: JUMP_IMPULSE, z: 0 }, true);
+      body.applyImpulse(
+        { x: up.x * JUMP_IMPULSE, y: up.y * JUMP_IMPULSE, z: up.z * JUMP_IMPULSE },
+        true,
+      );
     }
     this.jumpHeld = input.jump;
   }
