@@ -27,10 +27,11 @@ const Y = new THREE.Vector3(0, 1, 0);
 export class TubeMode implements RideMode {
   readonly overridesCamera = true;
 
-  /** AXIS: roll locked to the world (stable horizon). RIDER: camera rolls
-   *  so the rider is always at the bottom of the screen — inverted rider
-   *  means the whole level renders upside down. V toggles. */
-  private camVariant: 'axis' | 'rider' = 'axis';
+  /** RIDER (default): camera rolls so the rider is always at the bottom of
+   *  the screen — inverted rider means the whole level renders upside down.
+   *  AXIS: roll locked to the world (stable horizon). V toggles; every tube
+   *  entry resets to RIDER. */
+  private camVariant: 'axis' | 'rider' = 'rider';
 
   get name(): string {
     return this.camVariant === 'rider' ? 'TUBE·RIDER' : 'TUBE·AXIS';
@@ -78,6 +79,7 @@ export class TubeMode implements RideMode {
 
     this.s = smp.s;
     this.engaged = true;
+    this.camVariant = 'rider'; // every tube entry starts rider-pinned
     this.camBlend = 0;
     this.camStart.copy(ctx.chase.camera.position);
     this.camStartQ.copy(ctx.chase.camera.quaternion);
