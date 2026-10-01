@@ -60,6 +60,11 @@ export class ChaseCamera {
   private currentLook = new THREE.Vector3();
   // smoothed surface up — the camera rolls with walls and pipes
   private effUp = new THREE.Vector3(0, 1, 0);
+  // smoothed orbit base angle (shortest-arc), anchored to TRAVEL direction
+  // so air spins rotate the rider in frame instead of whipping the camera
+  private baseAngle = Math.PI;
+  // eased 0..1 airborne blend for the air pull-back
+  private airBlend = 0;
   // effective values from the last update, for the metadata readout
   private effAzimuth = 0;
   private effPolar = 0;
@@ -111,13 +116,19 @@ export class ChaseCamera {
   update(
     dt: number,
     target: THREE.Vector3,
-    heading: THREE.Vector3,
+    facing: THREE.Vector3,
     speed: number,
     surfaceUp?: THREE.Vector3,
+    travel?: THREE.Vector3,
+    airborne = false,
   ): void {
     const p = this.preset;
     let desired: THREE.Vector3;
     let look: THREE.Vector3;
+    // orbit modes anchor to travel direction (tricks read, switch riding
+    // doesn't flip the camera); BOARD cam stays facing-anchored
+    const heading = (!p.fpv && travel) ? travel : facing;
+    this.airBlend += ((airborne ? 1 : 0) - this.airBlend) * (1 - Math.exp(-dt * 4));
 
     // roll the whole rig with the riding surface (mostly — keep a bias
     // toward world-up so mild banks don't feel like the world is tilting)
@@ -145,18 +156,27 @@ export class ChaseCamera {
       this.effRadius = 0;
     } else {
       const azimuth = THREE.MathUtils.degToRad(p.azimuthDeg) + this.azimuthOffset;
+      // airborne: ease back and up a touch so the whole arc stays framed
       const polar = THREE.MathUtils.clamp(
-        THREE.MathUtils.degToRad(p.polarDeg) + this.polarOffset,
+        THREE.MathUtils.degToRad(p.polarDeg) + this.polarOffset - this.airBlend * 0.09,
         MIN_POLAR,
         MAX_POLAR,
       );
-      const radius = THREE.MathUtils.clamp(p.radius * this.radiusScale, MIN_RADIUS, MAX_RADIUS);
+      const radius = THREE.MathUtils.clamp(
+        p.radius * this.radiusScale * (1 + this.airBlend * 0.15),
+        MIN_RADIUS,
+        MAX_RADIUS,
+      );
       this.effAzimuth = azimuth;
       this.effPolar = polar;
       this.effRadius = radius;
 
-      const baseA = Math.atan2(-heading.x, -heading.z);
-      const a = baseA + azimuth;
+      // shortest-arc smoothing of the orbit base angle
+      const targetA = Math.atan2(-heading.x, -heading.z);
+      let delta = targetA - this.baseAngle;
+      delta = ((delta + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+      this.baseAngle += delta * (1 - Math.exp(-dt * 6));
+      const a = this.baseAngle + azimuth;
       const sinP = Math.sin(polar);
       const offset = new THREE.Vector3(
         Math.sin(a) * sinP * radius,
@@ -165,10 +185,13 @@ export class ChaseCamera {
       ).applyQuaternion(frameQ); // orbit in the rolled frame
       desired = target.clone().add(offset);
 
-      // look ahead when behind the rider, at the rider when off to the side
+      // look ahead along the SMOOTHED heading so look and orbit agree
+      const smoothHeading = new THREE.Vector3(
+        -Math.sin(this.baseAngle), 0, -Math.cos(this.baseAngle),
+      );
       const aheadAmount = Math.max(Math.cos(azimuth), 0) * p.lookAhead;
       look = target.clone()
-        .addScaledVector(heading, aheadAmount)
+        .addScaledVector(smoothHeading, aheadAmount)
         .addScaledVector(this.effUp, 1.2);
     }
 

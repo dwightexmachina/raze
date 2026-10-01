@@ -548,6 +548,15 @@ export class Rider {
       .applyQuaternion(new THREE.Quaternion(r.x, r.y, r.z, r.w));
   }
 
+  /** Direction of travel (planar) — what the chase camera anchors to.
+   *  Falls back to facing when nearly stopped. */
+  get travelHeading(): THREE.Vector3 {
+    const v = this.body.linvel();
+    const planar = Math.hypot(v.x, v.z);
+    if (planar > 2) return new THREE.Vector3(v.x / planar, 0, v.z / planar);
+    return this.heading;
+  }
+
   get heading(): THREE.Vector3 {
     const r = this.body.rotation();
     const q = new THREE.Quaternion(r.x, r.y, r.z, r.w);

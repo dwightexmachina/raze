@@ -267,7 +267,10 @@ async function boot(): Promise<void> {
     }
 
     rider.syncVisual(input);
-    chase.update(dt, rider.position, rider.heading, rider.speed, rider.boardUp);
+    chase.update(
+      dt, rider.position, rider.heading, rider.speed,
+      rider.boardUp, rider.travelHeading, !rider.grounded,
+    );
     updateGrid(grid, chase.camera.position);
     updateTrack(trackMesh, chase.camera.position);
     updateMetaPanel(dt);
