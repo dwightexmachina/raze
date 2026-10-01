@@ -19,6 +19,7 @@ export interface TrackSample {
   tubeAmt: number;         // 0 = open profile, 1 = fully closed tube
   tubeR: number;           // tube radius being morphed toward
   roll: number;            // frame roll, radians (twist spirals the UVs)
+  width: number;           // deck width at this sample (eased per segment)
 }
 
 /** Cross-section elevation at lateral u ∈ [-1, 1]: flat deck in the middle,
@@ -54,10 +55,10 @@ export class Track {
   /** Turtle-walk the segments into world-space samples with rolled frames. */
   private sample(): void {
     const spec = this.spec;
-    let x = 0, z = 0, y = 0, yaw = 0, s = 0, roll = 0, wl = 0, wr = 0;
+    let x = 0, z = 0, y = 0, yaw = 0, s = 0, roll = 0, wl = 0, wr = 0, width = spec.width;
     let tubeAmt = 0, tubeR = 7;
-    const raw: Array<{ x: number; y: number; z: number; roll: number; yaw: number; s: number; surfaced: boolean; wl: number; wr: number; tubeAmt: number; tubeR: number }> = [];
-    raw.push({ x, y, z, roll, yaw, s, surfaced: true, wl, wr, tubeAmt, tubeR });
+    const raw: Array<{ x: number; y: number; z: number; roll: number; yaw: number; s: number; surfaced: boolean; wl: number; wr: number; tubeAmt: number; tubeR: number; width: number }> = [];
+    raw.push({ x, y, z, roll, yaw, s, surfaced: true, wl, wr, tubeAmt, tubeR, width });
 
     for (let si = 0; si < spec.segments.length; si++) {
       const seg = spec.segments[si];
@@ -67,6 +68,8 @@ export class Track {
       const wlStart = wl, wrStart = wr;
       const wlTarget = seg.kind === 'gap' ? wl : (seg.wallL ?? 0);
       const wrTarget = seg.kind === 'gap' ? wr : (seg.wallR ?? 0);
+      const widthStart = width;
+      const widthTarget = seg.kind === 'gap' ? width : (seg.width ?? spec.width);
       const tubeStart = tubeAmt;
       const tubeTarget = seg.kind === 'gap' ? tubeAmt : (seg.tube ? 1 : 0);
       if (seg.tube) tubeR = seg.tube;
@@ -116,9 +119,10 @@ export class Track {
           + twistRad * t;
         wl = THREE.MathUtils.lerp(wlStart, wlTarget, ease);
         wr = THREE.MathUtils.lerp(wrStart, wrTarget, ease);
+        width = THREE.MathUtils.lerp(widthStart, widthTarget, ease);
         tubeAmt = THREE.MathUtils.lerp(tubeStart, tubeTarget, ease);
         s += ds;
-        raw.push({ x, y, z, roll, yaw, s, surfaced: seg.kind !== 'gap', wl, wr, tubeAmt, tubeR });
+        raw.push({ x, y, z, roll, yaw, s, surfaced: seg.kind !== 'gap', wl, wr, tubeAmt, tubeR, width });
       }
       // keep roll wrapped so a 360° twist doesn't unwind through the
       // next segment's ease back to 0
@@ -155,6 +159,7 @@ export class Track {
         tubeAmt: raw[i].tubeAmt,
         tubeR: raw[i].tubeR,
         roll: raw[i].roll,
+        width: raw[i].width,
       });
     }
 
@@ -253,7 +258,6 @@ export function buildTrack(
   spec: TrackSpec,
 ): BuiltTrack {
   const track = new Track(spec);
-  const hw = spec.width / 2;
   const S = track.samples;
 
   // ---- profile-swept mesh + trimesh collider over surfaced runs ----
@@ -277,6 +281,7 @@ export function buildTrack(
   const ringCount = spec.circuit ? S.length - 1 : S.length;
   for (let i = 0; i < ringCount; i++) {
     const smp = S[i];
+    const hw = smp.width / 2;
     const r0 = new THREE.Vector3().crossVectors(smp.tangent, Y).normalize();
     const u0 = new THREE.Vector3().crossVectors(r0, smp.tangent).normalize();
     for (let j = 0; j < ACROSS; j++) {

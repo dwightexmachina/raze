@@ -22,6 +22,10 @@ export type Segment = (
    *  ease in over the segment like roll does. */
   wallL?: number;
   wallR?: number;
+  /** Deck width override for this segment (default: TrackSpec.width).
+   *  Eases in/out like the walls — widen tight or sustained turns for
+   *  more margin without touching handling. */
+  width?: number;
   /** Full-tube radius: the cross-section closes into a cylinder of this
    *  radius (rider rides the inside). Morphs in/out over the segment. */
   tube?: number;
@@ -177,7 +181,7 @@ export const OUROBOROS: TrackSpec = {
     { kind: 'straight', length: 60, label: 'landing + rail' },                    //  216- 276
     { kind: 'straight', length: 34, label: 'pinch gate' },                        //  276- 310
     { kind: 'straight', length: 70, label: 'run-up A' },                          //  310- 380
-    { kind: 'arc', radius: 75, angle: 180, roll: 24, label: 'banked hairpin A' }, //  380- 616
+    { kind: 'arc', radius: 75, angle: 180, roll: 24, width: 24, wallR: 2.5, label: 'banked hairpin A' }, //  380- 616
     // ---- back straight (380 m) ----
     { kind: 'straight', length: 50, wallR: 7, label: 'wall alley' },              //  616- 666
     { kind: 'straight', length: 20, label: 'wall release' },                      //  666- 686
@@ -189,7 +193,7 @@ export const OUROBOROS: TrackSpec = {
     { kind: 'ramp', length: 24, rise: 5, label: 'big air' },                      //  900- 924
     { kind: 'gap', length: 22, label: 'void gap 2' },                             //  924- 946
     { kind: 'straight', length: 50, label: 'landing B' },                         //  946- 996
-    { kind: 'arc', radius: 75, angle: 180, roll: 24, label: 'banked hairpin B' }, //  996-1231
+    { kind: 'arc', radius: 75, angle: 180, roll: 24, width: 24, wallR: 2.5, label: 'banked hairpin B' }, //  996-1231
   ],
   attachments: [
     { kind: 'boost', at: 20, length: 10 },
