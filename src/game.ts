@@ -94,19 +94,20 @@ export async function startGame(): Promise<void> {
    *  deck (walking back from a void-gap landing to its takeoff edge) and
    *  keep some forward speed, so recovering from a small mistake is a
    *  near-instant bump-back rather than a trip to the last checkpoint. */
-  function recoverLocally(near: { idx: number }, priorSpeed: number): void {
+  function recoverLocally(near: { idx: number; branch: number }, priorSpeed: number): void {
+    const pool = near.branch < 0 ? track.samples : track.forkBranches[near.branch].samples;
     let idx = near.idx;
     let steps = 0;
-    while (!track.samples[idx].surfaced && steps < MAX_SURFACE_SCAN) {
-      idx = idx > 0 ? idx - 1 : track.samples.length - 1;
+    while (!pool[idx].surfaced && steps < MAX_SURFACE_SCAN) {
+      idx = idx > 0 ? idx - 1 : pool.length - 1;
       steps++;
     }
-    if (!track.samples[idx].surfaced) {
+    if (!pool[idx].surfaced) {
       // degenerate case (no deck found nearby) — fall back to the checkpoint
       spawnAt(Math.max(SPAWN_S, checkpointS - 4));
       return;
     }
-    const smp = track.samples[idx];
+    const smp = pool[idx];
     const yaw = Math.atan2(-smp.tangent.x, -smp.tangent.z);
     rider.setPose(smp.pos.clone().addScaledVector(smp.up, 1.8), yaw);
     const keepSpeed = THREE.MathUtils.clamp(priorSpeed * 0.6, 6, 20);
@@ -115,55 +116,77 @@ export async function startGame(): Promise<void> {
       true,
     );
     coordinator.forceHover();
-    nearIdx = idx;
-    checkpointS = smp.s;
+    // nearIdx/checkpointS live in MAIN-TRUNK arclength space — only
+    // update nearIdx when we actually recovered onto the trunk; when
+    // recovering onto a branch, bank the branch's fork point instead so
+    // a degenerate fallback still lands somewhere sane.
+    if (near.branch < 0) {
+      nearIdx = idx;
+      checkpointS = smp.s;
+    } else {
+      checkpointS = track.forkBranches[near.branch].forkAt;
+    }
   }
 
   function trackLogic(): void {
     const pos = rider.position;
     const near = track.nearest(pos, nearIdx);
-    const smp = track.samples[near.idx];
-    if (near.dist < track.spec.width * 1.5) {
-      nearIdx = near.idx;
-      const prevS = progressS;
-      progressS = smp.s;
-      // checkpoint only while over surfaced deck, close to it
-      if (smp.surfaced && pos.y > smp.pos.y - 1 && near.dist < track.spec.width * 0.7) {
-        checkpointS = smp.s;
-      }
-      // timing gates
-      if (isCircuit) {
-        // the lap line: first crossing starts lap 1; each later crossing
-        // banks a lap and restarts the clock (|Δs| guard skips the wrap
-        // jump and respawn teleports)
-        if (prevS < spec.start && progressS >= spec.start && Math.abs(progressS - prevS) < 30) {
-          const now = performance.now();
-          if (runStart !== null) {
-            lastMs = now - runStart;
-            if (bestMs === null || lastMs < bestMs) bestMs = lastMs;
-            lapCount++;
-          }
-          runStart = now;
-        }
-      } else {
-        if (prevS < track.spec.start && progressS >= track.spec.start) {
-          runStart = performance.now();
-          lastMs = null;
-        }
-        if (runStart !== null && prevS < track.spec.finish && progressS >= track.spec.finish) {
-          lastMs = performance.now() - runStart;
-          if (bestMs === null || lastMs < bestMs) bestMs = lastMs;
-          runStart = null;
-        }
-      }
-      // boost pad trigger
+    const smp = track.resolveSample(near);
+    const onBranch = near.branch >= 0;
+    const branchWidth = onBranch ? track.forkBranches[near.branch].width : track.spec.width;
+    if (near.dist < branchWidth * 1.5) {
+      // progress/lap-timing live in MAIN-TRUNK arclength space — freeze
+      // them while on a branch (they resume correctly once back on the
+      // trunk); checkpoint still banks, but to the branch's fork point
       const lateral = _diff.copy(pos).sub(smp.pos).dot(smp.right);
-      onBoostPad = track.isOnBoost(smp.s, lateral);
+      if (!onBranch) {
+        nearIdx = near.idx;
+        const prevS = progressS;
+        progressS = smp.s;
+        if (smp.surfaced && pos.y > smp.pos.y - 1 && near.dist < branchWidth * 0.7) {
+          checkpointS = smp.s;
+        }
+        // timing gates
+        if (isCircuit) {
+          // the lap line: first crossing starts lap 1; each later crossing
+          // banks a lap and restarts the clock (|Δs| guard skips the wrap
+          // jump and respawn teleports)
+          if (prevS < spec.start && progressS >= spec.start && Math.abs(progressS - prevS) < 30) {
+            const now = performance.now();
+            if (runStart !== null) {
+              lastMs = now - runStart;
+              if (bestMs === null || lastMs < bestMs) bestMs = lastMs;
+              lapCount++;
+            }
+            runStart = now;
+          }
+        } else {
+          if (prevS < track.spec.start && progressS >= track.spec.start) {
+            runStart = performance.now();
+            lastMs = null;
+          }
+          if (runStart !== null && prevS < track.spec.finish && progressS >= track.spec.finish) {
+            lastMs = performance.now() - runStart;
+            if (bestMs === null || lastMs < bestMs) bestMs = lastMs;
+            runStart = null;
+          }
+        }
+        onBoostPad = track.isOnBoost(smp.s, lateral);
+        const seg = track.segmentAt(smp.s);
+        riderTrackInfo.s = Math.round(smp.s * 10) / 10;
+        riderTrackInfo.segment = `${seg.label} [#${seg.index} ${seg.kind} ${Math.round(seg.from)}-${Math.round(seg.to)}m]`;
+      } else {
+        const b = track.forkBranches[near.branch];
+        if (smp.surfaced && pos.y > smp.pos.y - 1 && near.dist < branchWidth * 0.7) {
+          checkpointS = b.forkAt;
+        }
+        const hw = b.width / 2;
+        onBoostPad = Math.abs(lateral) <= hw && b.boostZones.some((z) => smp.s >= z.from && smp.s <= z.to);
+        riderTrackInfo.s = Math.round((b.forkAt + smp.s) * 10) / 10;
+        riderTrackInfo.segment = `fork: ${b.label} [${Math.round(smp.s)}m]`;
+      }
 
       camRadiusClamp = smp.tubeAmt > 0.5 ? smp.tubeR * 0.85 : 0;
-      const seg = track.segmentAt(smp.s);
-      riderTrackInfo.s = Math.round(smp.s * 10) / 10;
-      riderTrackInfo.segment = `${seg.label} [#${seg.index} ${seg.kind} ${Math.round(seg.from)}-${Math.round(seg.to)}m]`;
       riderTrackInfo.lateral = Math.round(lateral * 10) / 10;
       riderTrackInfo.aboveDeck = Math.round(_diff.copy(pos).sub(smp.pos).dot(smp.up) * 10) / 10;
       riderTrackInfo.distToTrack = Math.round(near.dist * 10) / 10;

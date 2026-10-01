@@ -32,6 +32,15 @@ export type Segment = (
   /** Extra roll applied linearly across the segment, degrees — corkscrews.
    *  Inside a tube the geometry is invariant; the seam and dashes spiral. */
   twist?: number;
+  /** Bend the centerline (for curvature/telemetry) without generating any
+   *  ribbon mesh or collider — the rider glides across in the air, same
+   *  mechanism as a 'gap' segment but usable on a turning/merging arc
+   *  (plain 'gap' segments can't carry radius/angle). Used for fork merge
+   *  tapers: two independently-sampled ribbons converging to the same
+   *  centerline would otherwise overlap in 3D and physically snag the
+   *  rider, even at a narrow width — gliding the convergence avoids any
+   *  two solid surfaces ever coexisting in the same space. */
+  unsurfaced?: boolean;
 };
 
 export type Attachment =
@@ -39,6 +48,34 @@ export type Attachment =
   | { kind: 'pylon'; at: number; offset: number }
   | { kind: 'gate'; at: number; opening: number }
   | { kind: 'rail'; at: number; length: number; offset: number; height?: number };
+
+/**
+ * One alternate line in a fork: starts at `forkAt` on the main spline,
+ * shifted sideways by `laneOffset` (meters, + = right of the main line's
+ * `right` vector at that point), then runs its own `segments` — straight/
+ * ramp/hill/gap only (no `arc`; lateral motion comes from laneOffset and
+ * the merge taper, not turning) — and should end back near the main
+ * line's position a bit further along so it reads as a rejoin, not a
+ * dead end. `segments`/`attachments` use branch-local arclength from 0
+ * at the fork.
+ */
+export interface AltBranch {
+  label: string;
+  forkAt: number;
+  laneOffset: number;
+  /** Heading offset (degrees) from the main line's own heading at the
+   *  fork. A shallow constant angle lets one straight segment merge back
+   *  to the trunk by simple geometry (like a highway on-ramp) instead of
+   *  an S-curve — important because this game's air-steering only spins
+   *  the rider, it never translates a ballistic trajectory sideways, so
+   *  a curving reconvergence can't be completed if the rider goes
+   *  airborne mid-curve. Positive turns the same direction as a
+   *  positive-angle arc. */
+  entryAngle?: number;
+  width?: number;
+  segments: Segment[];
+  attachments?: Attachment[];
+}
 
 export interface TrackSpec {
   name: string;
@@ -58,6 +95,10 @@ export interface TrackSpec {
   ambientCurb?: number;
   segments: Segment[];
   attachments: Attachment[];
+  /** Fork groups: alternate lines that diverge from the main spline and
+   *  rejoin it further along. One group ships today (OUROBOROS); the
+   *  array shape allows more than one fork per track later. */
+  forks?: AltBranch[];
 }
 
 /** Starter track per docs/TRACK_ELEMENTS.md — every element tests an
@@ -184,10 +225,21 @@ export const OUROBOROS: TrackSpec = {
     { kind: 'straight', length: 40, label: 'start/finish' },                      //    0-  40
     { kind: 'hill', length: 50, height: 2.5, label: 'crest' },                    //   40-  90
     { kind: 'hill', length: 34, height: -1.5, label: 'dip' },                     //   90- 124
-    { kind: 'straight', length: 60, label: 'pylon slalom' },                      //  124- 184
-    { kind: 'ramp', length: 18, rise: 3, label: 'kicker' },                       //  184- 202
-    { kind: 'gap', length: 14, label: 'void gap 1' },                             //  202- 216
-    { kind: 'straight', length: 60, label: 'landing + rail' },                    //  216- 276
+    // fork: safe trunk (wide, zero risk) vs. the rail/jump branches below
+    // fork trunk: normal width while branches run safely alongside, then
+    // WIDENS to engulf both branches' endpoints — the trunk reaching out
+    // (one continuous mesh, no self-overlap possible) is what performs
+    // the merge, not the branches converging onto it
+    // no ambient curb from here through the widen ramp: wall height
+    // EASES across a segment boundary (lerped over the segment's first
+    // half), so leaving 'safe line' at the default ambientCurb would
+    // still leave a residual nonzero wall bleeding into the first few
+    // meters of 'merge widen' — exactly where the trunk's edge is
+    // sweeping outward through the branches' lane and a curb would
+    // become a steep wall straight through their riders
+    { kind: 'straight', length: 122, width: 18, wallL: 0, wallR: 0, label: 'safe line' }, // 124-246
+    { kind: 'straight', length: 12, width: 50, wallL: 0, wallR: 0, label: 'merge widen' }, // 246-258
+    { kind: 'straight', length: 18, width: 50, label: 'merge zone' },            //  258- 276
     { kind: 'straight', length: 34, label: 'pinch gate' },                        //  276- 310
     { kind: 'straight', length: 70, label: 'run-up A' },                          //  310- 380
     { kind: 'arc', radius: 75, angle: 180, roll: 24, width: 24, wallR: 2.5, label: 'banked hairpin A' }, //  380- 616
@@ -206,13 +258,58 @@ export const OUROBOROS: TrackSpec = {
   ],
   attachments: [
     { kind: 'boost', at: 20, length: 10 },
-    { kind: 'pylon', at: 134, offset: -3.5 },
-    { kind: 'pylon', at: 148, offset: 3.5 },
-    { kind: 'pylon', at: 162, offset: -3.5 },
-    { kind: 'pylon', at: 176, offset: 3.5 },
-    { kind: 'rail', at: 224, length: 34, offset: 5, height: 0.8 },   // landing grind
     { kind: 'gate', at: 292, opening: 7 },
     { kind: 'rail', at: 700, length: 40, offset: -8, height: 6.4 },  // half-pipe lip
     { kind: 'boost', at: 958, length: 10 },
+  ],
+  // The Forks concept: one fork at mainS 124, three lines, one rejoin at
+  // mainS 276. Branches stay at a CONSTANT parallel laneOffset their
+  // whole length — no curving/angling at all. Two reasons: this game's
+  // air-steering only spins the rider, it never translates a ballistic
+  // trajectory sideways, so a curving reconvergence can't be completed
+  // if the rider goes airborne mid-curve; and a grounded curve close
+  // enough to the trunk to converge necessarily overlaps the trunk's own
+  // deck in 3D, physically wedging the rider against both surfaces.
+  // Instead each branch simply ENDS while still safely clear of the
+  // trunk's unwidened edge — the trunk itself then WIDENS (see 'fork:
+  // merge widen'/'merge zone' above) to engulf both branch endpoints.
+  // A single continuous mesh can't overlap itself, so the merge is
+  // physically guaranteed safe. Branches run a few meters INTO the
+  // widen ramp (past mainS 246) rather than stopping right at its
+  // start — the ramp needs ~4-6m to widen enough to reach each
+  // branch's laneOffset, and ending exactly at the ramp's start would
+  // leave the branch floating over a sliver of trunk too narrow to
+  // catch it yet. The small tail overlap with the widened trunk is
+  // flush/coplanar (same height, zero relative angle), not a fold, so
+  // it can't wedge the rider the way the earlier angled-convergence
+  // attempts did.
+  forks: [
+    {
+      label: 'rail line',
+      forkAt: 124,
+      laneOffset: -15,
+      width: 9,
+      segments: [
+        { kind: 'straight', length: 130, label: 'rail run' },
+      ],
+      attachments: [
+        { kind: 'boost', at: 8, length: 10 },
+        { kind: 'rail', at: 4, length: 104, offset: 0, height: 0.8 },
+        { kind: 'boost', at: 112, length: 8 },
+      ],
+    },
+    {
+      label: 'jump line',
+      forkAt: 124,
+      laneOffset: 17,
+      width: 12,
+      segments: [
+        { kind: 'straight', length: 40, label: 'run-up' },
+        { kind: 'ramp', length: 18, rise: 3, label: 'kicker' },
+        { kind: 'gap', length: 14, label: 'void gap' },
+        { kind: 'straight', length: 58, label: 'landing' },
+      ],
+      attachments: [],
+    },
   ],
 };

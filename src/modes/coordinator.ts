@@ -37,9 +37,11 @@ export class ModeCoordinator {
 
     // keep the nearest-sample hint current in EVERY mode — a hint frozen
     // during a long tube run goes stale and causes spurious re-entries
-    // while it crawls back to the rider after exit
+    // while it crawls back to the rider after exit. The hint only indexes
+    // the MAIN trunk's windowed search (branches are always full-scanned),
+    // so don't let a branch position corrupt it.
     const near = this.ctx.track.nearest(this.ctx.rider.position, this.nearHint);
-    this.nearHint = near.idx;
+    if (near.branch < 0) this.nearHint = near.idx;
 
     const req = this.active.step(this.ctx, padBoost);
     if (req) {
@@ -48,14 +50,17 @@ export class ModeCoordinator {
     }
 
     if (this.active === this.hover) {
-      // tube sensor: fully-closed tube at the rider's track position
-      const smp = this.ctx.track.samples[near.idx];
-      // enter only in fully-formed tube (hysteresis vs the mode's exit
-      // threshold at 0.97, so the boundary can't flap)
-      if (smp.tubeAmt > 0.995 && near.dist < smp.tubeR * 2.2) {
-        this.tube.pendingIdx = near.idx;
-        this.switchTo('tube');
-        return;
+      // tube sensor: fully-closed tube at the rider's track position.
+      // Fork branches never contain tube geometry, so only check on trunk.
+      if (near.branch < 0) {
+        const smp = this.ctx.track.samples[near.idx];
+        // enter only in fully-formed tube (hysteresis vs the mode's exit
+        // threshold at 0.97, so the boundary can't flap)
+        if (smp.tubeAmt > 0.995 && near.dist < smp.tubeR * 2.2) {
+          this.tube.pendingIdx = near.idx;
+          this.switchTo('tube');
+          return;
+        }
       }
       // rail snap
       const snap = this.grind.trySnap(this.ctx);

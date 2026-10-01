@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type RAPIER_API from '@dimforge/rapier3d-compat';
-import type { TrackSpec, Attachment } from './spec';
+import type { TrackSpec, Attachment, Segment } from './spec';
 
 type Rapier = typeof RAPIER_API;
 
@@ -35,7 +35,7 @@ export function wallElev(u: number, wallL: number, wallR: number): number {
   return (u < 0 ? wallL : wallR) * k * k;
 }
 
-interface BoostZone { from: number; to: number }
+export interface BoostZone { from: number; to: number }
 
 export interface SegmentRange {
   index: number;
@@ -45,10 +45,160 @@ export interface SegmentRange {
   to: number;
 }
 
+interface RawSample {
+  x: number; y: number; z: number; roll: number; yaw: number; s: number;
+  surfaced: boolean; wl: number; wr: number; tubeAmt: number; tubeR: number; width: number;
+}
+
+interface WalkState {
+  x: number; y: number; z: number; yaw: number; roll: number;
+  wl: number; wr: number; width: number; tubeAmt: number; tubeR: number;
+}
+
+/** Turtle-walk a segment list into raw samples, starting from `start`
+ *  (branch-local s always begins at 0). Shared by the main trunk and
+ *  every fork branch so segment-kind math (hill/ramp/arc/gap, roll/wall/
+ *  width/tube easing, curvature-aware density) never drifts between them. */
+function walkSegments(
+  start: WalkState,
+  segments: Segment[],
+  defaultWidth: number,
+  ambientCurb: number,
+  recordRange?: (r: SegmentRange) => void,
+): RawSample[] {
+  let { x, y, z, yaw, roll, wl, wr, width, tubeAmt, tubeR } = start;
+  let s = 0;
+  const raw: RawSample[] = [{ x, y, z, roll, yaw, s, surfaced: true, wl, wr, tubeAmt, tubeR, width }];
+
+  for (let si = 0; si < segments.length; si++) {
+    const seg = segments[si];
+    const rollStart = roll;
+    const rollTarget = seg.kind === 'gap' ? roll : ((seg as { roll?: number }).roll ?? 0);
+    const twistRad = THREE.MathUtils.degToRad(seg.twist ?? 0);
+    const wlStart = wl, wrStart = wr;
+    const wlTarget = seg.kind === 'gap' ? wl : (seg.wallL ?? ambientCurb);
+    const wrTarget = seg.kind === 'gap' ? wr : (seg.wallR ?? ambientCurb);
+    const widthStart = width;
+    const widthTarget = seg.kind === 'gap' ? width : (seg.width ?? defaultWidth);
+    const tubeStart = tubeAmt;
+    const tubeTarget = seg.kind === 'gap' ? tubeAmt : (seg.tube ? 1 : 0);
+    if (seg.tube) tubeR = seg.tube;
+    const length = seg.kind === 'arc'
+      ? Math.abs(THREE.MathUtils.degToRad(seg.angle)) * seg.radius
+      : seg.length;
+    if (recordRange) {
+      recordRange({ index: si, kind: seg.kind, label: seg.label ?? seg.kind, from: s, to: s + length });
+    }
+    // curvature-aware density: keep facet fold angles small so the board
+    // never lands across a sharp crease (hills/ramps bend vertically,
+    // arcs bend by yaw — cap both at roughly a degree per facet)
+    let n = Math.max(2, Math.ceil(length / DS));
+    if (seg.kind === 'hill' || seg.kind === 'ramp') n = Math.max(n, Math.ceil(length / 0.6));
+    if (seg.kind === 'arc') n = Math.max(n, Math.ceil(Math.abs(seg.angle) / 1.2));
+    // twist rotates the tube's facet pattern — sample finely so the
+    // interior ridges spiral smoothly instead of jumping per ring
+    if (seg.twist) n = Math.max(n, Math.ceil(Math.abs(seg.twist) / 1.5));
+    const y0 = y;
+
+    for (let i = 1; i <= n; i++) {
+      const t = i / n;
+      const ds = length / n;
+      if (seg.kind === 'arc') {
+        yaw += THREE.MathUtils.degToRad(seg.angle) / n;
+      }
+      x += -Math.sin(yaw) * ds;
+      z += -Math.cos(yaw) * ds;
+      if (seg.kind === 'hill') {
+        const b = Math.sin(Math.PI * t);
+        y = y0 + seg.height * b * b;
+      } else if (seg.kind === 'ramp') {
+        // parabolic kicker: uniform entry curvature (no smoothstep
+        // curvature spike at the base) and full slope AT the lip, so
+        // launch ramps actually launch
+        y = y0 + seg.rise * t * t;
+      }
+      // roll, walls, and tube morph ease to targets over the first half;
+      // twist adds linearly across the whole segment
+      const rt = Math.min(1, t / 0.5);
+      const ease = rt * rt * (3 - 2 * rt);
+      roll = THREE.MathUtils.lerp(rollStart, THREE.MathUtils.degToRad(rollTarget), ease)
+        + twistRad * t;
+      wl = THREE.MathUtils.lerp(wlStart, wlTarget, ease);
+      wr = THREE.MathUtils.lerp(wrStart, wrTarget, ease);
+      width = THREE.MathUtils.lerp(widthStart, widthTarget, ease);
+      tubeAmt = THREE.MathUtils.lerp(tubeStart, tubeTarget, ease);
+      s += ds;
+      const surfaced = seg.kind !== 'gap' && !seg.unsurfaced;
+      raw.push({ x, y, z, roll, yaw, s, surfaced, wl, wr, tubeAmt, tubeR, width });
+    }
+    // keep roll wrapped so a 360° twist doesn't unwind through the
+    // next segment's ease back to 0
+    roll = Math.atan2(Math.sin(roll), Math.cos(roll));
+    if (seg.kind === 'gap') y = 0; // landings return to deck level
+  }
+  return raw;
+}
+
+/** Raw samples → world-space frames (central-difference tangents, then
+ *  roll about the tangent). Clamps the difference window to the same
+ *  surfaced run so gap-edge discontinuities don't tilt lip/landing frames. */
+function buildFrames(raw: RawSample[], baseY: number): TrackSample[] {
+  const out: TrackSample[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    let ia = Math.max(0, i - 1);
+    let ib = Math.min(raw.length - 1, i + 1);
+    if (raw[i].surfaced) {
+      if (!raw[ia].surfaced) ia = i;
+      if (!raw[ib].surfaced) ib = i;
+    }
+    const a = raw[ia];
+    const b = raw[ib === ia ? Math.min(raw.length - 1, i + 1) : ib];
+    const tangent = new THREE.Vector3(b.x - a.x, b.y - a.y, b.z - a.z).normalize();
+    const r0 = new THREE.Vector3().crossVectors(tangent, new THREE.Vector3(0, 1, 0)).normalize();
+    const u0 = new THREE.Vector3().crossVectors(r0, tangent).normalize();
+    const c = Math.cos(raw[i].roll), sn = Math.sin(raw[i].roll);
+    const right = r0.clone().multiplyScalar(c).addScaledVector(u0, sn).normalize();
+    const up = u0.clone().multiplyScalar(c).addScaledVector(r0, -sn).normalize();
+    out.push({
+      pos: new THREE.Vector3(raw[i].x, raw[i].y + baseY, raw[i].z),
+      tangent, right, up,
+      yaw: raw[i].yaw,
+      s: raw[i].s,
+      surfaced: raw[i].surfaced,
+      wallL: raw[i].wl,
+      wallR: raw[i].wr,
+      tubeAmt: raw[i].tubeAmt,
+      tubeR: raw[i].tubeR,
+      roll: raw[i].roll,
+      width: raw[i].width,
+    });
+  }
+  return out;
+}
+
+export interface ForkBranch {
+  label: string;
+  /** Main-trunk arclength this branch diverges from — the valid
+   *  main-trunk `s` to treat as "last known good" while riding it. */
+  forkAt: number;
+  samples: TrackSample[];
+  attachments: Attachment[];
+  width: number;
+  boostZones: BoostZone[];
+}
+
+export interface NearestResult {
+  idx: number;
+  dist: number;
+  /** -1 = main trunk; otherwise an index into Track.forkBranches. */
+  branch: number;
+}
+
 export class Track {
   readonly samples: TrackSample[] = [];
   readonly spec: TrackSpec;
   readonly segmentRanges: SegmentRange[] = [];
+  readonly forkBranches: ForkBranch[] = [];
   private boostZones: BoostZone[] = [];
 
   constructor(spec: TrackSpec) {
@@ -56,117 +206,21 @@ export class Track {
     this.sample();
   }
 
-  /** Turtle-walk the segments into world-space samples with rolled frames. */
+  get width(): number {
+    return this.spec.width;
+  }
+
+  /** Resolve a nearest() result (main or branch) to its TrackSample. */
+  resolveSample(near: { idx: number; branch: number }): TrackSample {
+    return near.branch < 0 ? this.samples[near.idx] : this.forkBranches[near.branch].samples[near.idx];
+  }
+
   private sample(): void {
     const spec = this.spec;
-    let x = 0, z = 0, y = 0, yaw = 0, s = 0, roll = 0, wl = 0, wr = 0, width = spec.width;
-    let tubeAmt = 0, tubeR = 7;
-    const raw: Array<{ x: number; y: number; z: number; roll: number; yaw: number; s: number; surfaced: boolean; wl: number; wr: number; tubeAmt: number; tubeR: number; width: number }> = [];
-    raw.push({ x, y, z, roll, yaw, s, surfaced: true, wl, wr, tubeAmt, tubeR, width });
-
-    for (let si = 0; si < spec.segments.length; si++) {
-      const seg = spec.segments[si];
-      const rollStart = roll;
-      const rollTarget = seg.kind === 'gap' ? roll : ((seg as { roll?: number }).roll ?? 0);
-      const twistRad = THREE.MathUtils.degToRad(seg.twist ?? 0);
-      const wlStart = wl, wrStart = wr;
-      const curb = spec.ambientCurb ?? 0;
-      const wlTarget = seg.kind === 'gap' ? wl : (seg.wallL ?? curb);
-      const wrTarget = seg.kind === 'gap' ? wr : (seg.wallR ?? curb);
-      const widthStart = width;
-      const widthTarget = seg.kind === 'gap' ? width : (seg.width ?? spec.width);
-      const tubeStart = tubeAmt;
-      const tubeTarget = seg.kind === 'gap' ? tubeAmt : (seg.tube ? 1 : 0);
-      if (seg.tube) tubeR = seg.tube;
-      const length = seg.kind === 'arc'
-        ? Math.abs(THREE.MathUtils.degToRad(seg.angle)) * seg.radius
-        : seg.length;
-      this.segmentRanges.push({
-        index: si,
-        kind: seg.kind,
-        label: seg.label ?? seg.kind,
-        from: s,
-        to: s + length,
-      });
-      // curvature-aware density: keep facet fold angles small so the board
-      // never lands across a sharp crease (hills/ramps bend vertically,
-      // arcs bend by yaw — cap both at roughly a degree per facet)
-      let n = Math.max(2, Math.ceil(length / DS));
-      if (seg.kind === 'hill' || seg.kind === 'ramp') n = Math.max(n, Math.ceil(length / 0.6));
-      if (seg.kind === 'arc') n = Math.max(n, Math.ceil(Math.abs(seg.angle) / 1.2));
-      // twist rotates the tube's facet pattern — sample finely so the
-      // interior ridges spiral smoothly instead of jumping per ring
-      if (seg.twist) n = Math.max(n, Math.ceil(Math.abs(seg.twist) / 1.5));
-      const y0 = y;
-
-      for (let i = 1; i <= n; i++) {
-        const t = i / n;
-        const ds = length / n;
-        if (seg.kind === 'arc') {
-          yaw += THREE.MathUtils.degToRad(seg.angle) / n;
-        }
-        x += -Math.sin(yaw) * ds;
-        z += -Math.cos(yaw) * ds;
-        if (seg.kind === 'hill') {
-          const b = Math.sin(Math.PI * t);
-          y = y0 + seg.height * b * b;
-        } else if (seg.kind === 'ramp') {
-          // parabolic kicker: uniform entry curvature (no smoothstep
-          // curvature spike at the base) and full slope AT the lip, so
-          // launch ramps actually launch
-          y = y0 + seg.rise * t * t;
-        }
-        // roll, walls, and tube morph ease to targets over the first half;
-        // twist adds linearly across the whole segment
-        const rt = Math.min(1, t / 0.5);
-        const ease = rt * rt * (3 - 2 * rt);
-        roll = THREE.MathUtils.lerp(rollStart, THREE.MathUtils.degToRad(rollTarget), ease)
-          + twistRad * t;
-        wl = THREE.MathUtils.lerp(wlStart, wlTarget, ease);
-        wr = THREE.MathUtils.lerp(wrStart, wrTarget, ease);
-        width = THREE.MathUtils.lerp(widthStart, widthTarget, ease);
-        tubeAmt = THREE.MathUtils.lerp(tubeStart, tubeTarget, ease);
-        s += ds;
-        raw.push({ x, y, z, roll, yaw, s, surfaced: seg.kind !== 'gap', wl, wr, tubeAmt, tubeR, width });
-      }
-      // keep roll wrapped so a 360° twist doesn't unwind through the
-      // next segment's ease back to 0
-      roll = Math.atan2(Math.sin(roll), Math.cos(roll));
-      if (seg.kind === 'gap') y = 0; // landings return to deck level
-    }
-
-    // build frames (central-difference tangents, then roll about the tangent);
-    // clamp the difference window to the same surfaced run so gap-edge
-    // discontinuities don't tilt the lip/landing frames
-    for (let i = 0; i < raw.length; i++) {
-      let ia = Math.max(0, i - 1);
-      let ib = Math.min(raw.length - 1, i + 1);
-      if (raw[i].surfaced) {
-        if (!raw[ia].surfaced) ia = i;
-        if (!raw[ib].surfaced) ib = i;
-      }
-      const a = raw[ia];
-      const b = raw[ib === ia ? Math.min(raw.length - 1, i + 1) : ib];
-      const tangent = new THREE.Vector3(b.x - a.x, b.y - a.y, b.z - a.z).normalize();
-      const r0 = new THREE.Vector3().crossVectors(tangent, new THREE.Vector3(0, 1, 0)).normalize();
-      const u0 = new THREE.Vector3().crossVectors(r0, tangent).normalize();
-      const c = Math.cos(raw[i].roll), sn = Math.sin(raw[i].roll);
-      const right = r0.clone().multiplyScalar(c).addScaledVector(u0, sn).normalize();
-      const up = u0.clone().multiplyScalar(c).addScaledVector(r0, -sn).normalize();
-      this.samples.push({
-        pos: new THREE.Vector3(raw[i].x, raw[i].y + this.spec.baseY, raw[i].z),
-        tangent, right, up,
-        yaw: raw[i].yaw,
-        s: raw[i].s,
-        surfaced: raw[i].surfaced,
-        wallL: raw[i].wl,
-        wallR: raw[i].wr,
-        tubeAmt: raw[i].tubeAmt,
-        tubeR: raw[i].tubeR,
-        roll: raw[i].roll,
-        width: raw[i].width,
-      });
-    }
+    const curb = spec.ambientCurb ?? 0;
+    const start: WalkState = { x: 0, y: 0, z: 0, yaw: 0, roll: 0, wl: 0, wr: 0, width: spec.width, tubeAmt: 0, tubeR: 7 };
+    const raw = walkSegments(start, spec.segments, spec.width, curb, (r) => this.segmentRanges.push(r));
+    this.samples.push(...buildFrames(raw, spec.baseY));
 
     for (const att of this.spec.attachments) {
       if (att.kind === 'boost') this.boostZones.push({ from: att.at, to: att.at + att.length });
@@ -190,6 +244,34 @@ export class Track {
         smp.up.copy(u0);
       }
     }
+
+    // fork branches: each starts from the main trunk's exact pose at
+    // forkAt, shifted sideways by laneOffset, then walks its own
+    // segments (straight-kind only — no 'arc') as an independent chain.
+    for (const branch of spec.forks ?? []) {
+      const f = this.frameAt(branch.forkAt);
+      const bw = branch.width ?? spec.width;
+      const branchStart: WalkState = {
+        x: f.pos.x + f.right.x * branch.laneOffset,
+        y: f.pos.y - spec.baseY + f.right.y * branch.laneOffset,
+        z: f.pos.z + f.right.z * branch.laneOffset,
+        yaw: f.yaw + THREE.MathUtils.degToRad(branch.entryAngle ?? 0),
+        roll: 0, wl: 0, wr: 0, width: bw, tubeAmt: 0, tubeR: 7,
+      };
+      const braw = walkSegments(branchStart, branch.segments, bw, curb);
+      const battachments = branch.attachments ?? [];
+      const boostZones: BoostZone[] = battachments
+        .filter((a): a is Extract<Attachment, { kind: 'boost' }> => a.kind === 'boost')
+        .map((a) => ({ from: a.at, to: a.at + a.length }));
+      this.forkBranches.push({
+        label: branch.label,
+        forkAt: branch.forkAt,
+        samples: buildFrames(braw, spec.baseY),
+        attachments: battachments,
+        width: bw,
+        boostZones,
+      });
+    }
   }
 
   get totalS(): number {
@@ -205,13 +287,15 @@ export class Track {
     return this.samples[lo];
   }
 
-  /** Nearest sample to a world position, searching around a hint index.
-   *  On circuits the search window wraps across the seam. Self-healing:
-   *  if the windowed result is implausibly far (stale hint — e.g. a
-   *  teleport/respawn/mode-transition the caller didn't resync), falls
-   *  back to a full scan so a bad hint corrects itself within one call
-   *  instead of needing every caller to choreograph resyncs correctly. */
-  nearest(pos: THREE.Vector3, hintIdx: number): { idx: number; dist: number } {
+  /** Nearest sample to a world position, searching around a hint index
+   *  on the main trunk (fork branches are always full-scanned — they're
+   *  short, there's rarely more than one or two, and it keeps the hint
+   *  bookkeeping simple). On circuits the main-trunk window wraps across
+   *  the seam. Self-healing: if the windowed main-trunk result is
+   *  implausibly far (stale hint — e.g. a teleport/respawn/mode-transition
+   *  the caller didn't resync), falls back to a full scan of the trunk too,
+   *  so a bad hint corrects itself within one call. */
+  nearest(pos: THREE.Vector3, hintIdx: number): NearestResult {
     const N = this.samples.length;
     let best = hintIdx, bestD = Infinity;
     if (this.spec.circuit) {
@@ -235,7 +319,15 @@ export class Track {
         if (d < bestD) { bestD = d; best = i; }
       }
     }
-    return { idx: best, dist: Math.sqrt(bestD) };
+    let branch = -1;
+    for (let bi = 0; bi < this.forkBranches.length; bi++) {
+      const bs = this.forkBranches[bi].samples;
+      for (let i = 0; i < bs.length; i++) {
+        const d = bs[i].pos.distanceToSquared(pos);
+        if (d < bestD) { bestD = d; best = i; branch = bi; }
+      }
+    }
+    return { idx: best, dist: Math.sqrt(bestD), branch };
   }
 
   segmentAt(s: number): SegmentRange {
@@ -267,34 +359,27 @@ export interface BuiltTrack {
   rails: RailLine[];
 }
 
-export function buildTrack(
-  scene: THREE.Scene,
-  world: RAPIER_API.World,
-  RAPIER: Rapier,
-  spec: TrackSpec,
-): BuiltTrack {
-  const track = new Track(spec);
-  const S = track.samples;
+const ACROSS = 29; // vertices across the profile; keeps tube facets shallow
 
-  // ---- profile-swept mesh + trimesh collider over surfaced runs ----
-  // Each sample sweeps a cross-section: flat deck with walls, blended
-  // toward a full cylinder when the sample is inside a tube morph.
-  // 29 vertices across keeps tube interior facets shallow (~13°).
-  const ACROSS = 29;
-  // ONE geometry for visual and collider, with the tube portion built in
-  // the UNROLLED frame. Two reasons: a twisted POLYGON's interior ridges
-  // rotate like an auger (physics must ride a stationary cylinder), and
-  // the tube circle's axis sits a radius above the centerline — rolling
-  // the frame would crank that axis around the spline and swing the tube
-  // away from where physics says it is. Twist instead spirals the UVs,
-  // so the seam light and dashes corkscrew while the steel stays put.
+/** Profile-swept ribbon arrays for one sample array (main trunk or a fork
+ *  branch): flat deck with walls, blended toward a full cylinder when a
+ *  sample is inside a tube morph. ONE geometry serves both the visual mesh
+ *  and the physics collider, built in the UNROLLED frame — a twisted
+ *  POLYGON's interior ridges would otherwise rotate like an auger, and the
+ *  tube's axis sits a radius above the centerline, so rolling the frame
+ *  would swing it away from where physics says it is. Twist spirals the
+ *  UVs instead, so the seam light/dashes corkscrew while the steel stays
+ *  put. `circuit`: drop the duplicate seam ring and weld the last strip
+ *  to ring 0, so there's no zero-width crack at the lap line. */
+function buildRibbonArrays(
+  S: TrackSample[],
+  circuit: boolean,
+): { positions: number[]; uvs: number[]; indices: number[] } {
   const positions: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
   const Y = new THREE.Vector3(0, 1, 0);
-  // circuits: drop the duplicate seam ring and weld the last strip to
-  // ring 0 — a zero-width crack at the lap line would catch the board
-  const ringCount = spec.circuit ? S.length - 1 : S.length;
+  const ringCount = circuit ? S.length - 1 : S.length;
   for (let i = 0; i < ringCount; i++) {
     const smp = S[i];
     const hw = smp.width / 2;
@@ -323,19 +408,94 @@ export function buildTrack(
       }
     }
   }
-
-  if (spec.circuit && S[0].surfaced && S[ringCount - 1].surfaced) {
+  if (circuit && S[0].surfaced && S[ringCount - 1].surfaced) {
     const prev = (ringCount - 1) * ACROSS;
     for (let j = 0; j < ACROSS - 1; j++) {
       indices.push(prev + j, prev + j + 1, j, prev + j + 1, j + 1, j);
     }
   }
+  return { positions, uvs, indices };
+}
 
+/** Seal a tube's seam: with the unrolled collider the seam crack sits
+ *  fixed at the TOP of the tube; thin boxes close it so a rider carving
+ *  over the top can't slip through the zero-width crack. */
+function sealTubeSeams(world: RAPIER_API.World, RAPIER: Rapier, S: TrackSample[]): void {
+  for (let i = 1; i < S.length; i++) {
+    const smp = S[i], prev = S[i - 1];
+    if (!(smp.surfaced && smp.tubeAmt > 0.9 && prev.tubeAmt > 0.9)) continue;
+    const segLen = smp.pos.distanceTo(prev.pos);
+    const center = smp.pos.clone().add(prev.pos).multiplyScalar(0.5);
+    const tanMid = smp.tangent.clone().add(prev.tangent).normalize();
+    const r0 = new THREE.Vector3().crossVectors(tanMid, new THREE.Vector3(0, 1, 0)).normalize();
+    const u0 = new THREE.Vector3().crossVectors(r0, tanMid).normalize();
+    center.addScaledVector(u0, 2 * smp.tubeR); // seam = top of the circle
+    const m = new THREE.Matrix4().makeBasis(r0, u0, new THREE.Vector3().crossVectors(r0, u0));
+    const q = new THREE.Quaternion().setFromRotationMatrix(m);
+    const seamBody = world.createRigidBody(
+      RAPIER.RigidBodyDesc.fixed()
+        .setTranslation(center.x, center.y, center.z)
+        .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }),
+    );
+    world.createCollider(RAPIER.ColliderDesc.cuboid(0.5, 0.08, segLen / 2 + 0.3), seamBody);
+  }
+}
+
+/** Mesh (shared material) + trimesh collider for one ribbon. */
+function addRibbon(
+  scene: THREE.Scene,
+  world: RAPIER_API.World,
+  RAPIER: Rapier,
+  S: TrackSample[],
+  circuit: boolean,
+  material: THREE.ShaderMaterial,
+): THREE.Mesh {
+  const { positions, uvs, indices } = buildRibbonArrays(S, circuit);
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geo.setIndex(indices);
   geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(geo, material);
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+
+  const body = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+  world.createCollider(
+    RAPIER.ColliderDesc.trimesh(new Float32Array(positions), new Uint32Array(indices)),
+    body,
+  );
+  sealTubeSeams(world, RAPIER, S);
+  return mesh;
+}
+
+/** Minimal attachment-placement source: satisfied by Track itself and by
+ *  BranchSource below, so buildAttachment() works for both the main
+ *  trunk and fork branches without duplicating its geometry code. */
+export interface FrameSource {
+  readonly width: number;
+  frameAt(s: number): TrackSample;
+}
+
+class BranchSource implements FrameSource {
+  constructor(private readonly samples: TrackSample[], readonly width: number) {}
+  frameAt(s: number): TrackSample {
+    let lo = 0, hi = this.samples.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.samples[mid].s < s) lo = mid + 1; else hi = mid;
+    }
+    return this.samples[lo];
+  }
+}
+
+export function buildTrack(
+  scene: THREE.Scene,
+  world: RAPIER_API.World,
+  RAPIER: Rapier,
+  spec: TrackSpec,
+): BuiltTrack {
+  const track = new Track(spec);
 
   const mat = new THREE.ShaderMaterial({
     side: THREE.DoubleSide,
@@ -382,40 +542,7 @@ export function buildTrack(
       }
     `,
   });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.frustumCulled = false;
-  scene.add(mesh);
-
-  const body = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
-  world.createCollider(
-    RAPIER.ColliderDesc.trimesh(new Float32Array(positions), new Uint32Array(indices)),
-    body,
-  );
-
-  // seal the collider tube's seam: with the unrolled collider the seam
-  // crack sits fixed at the TOP of the tube; thin boxes close it so a
-  // rider carving over the top can't slip through the zero-width crack
-  for (let i = 1; i < S.length; i++) {
-    const smp = S[i], prev = S[i - 1];
-    if (!(smp.surfaced && smp.tubeAmt > 0.9 && prev.tubeAmt > 0.9)) continue;
-    const segLen = smp.pos.distanceTo(prev.pos);
-    const center = smp.pos.clone().add(prev.pos).multiplyScalar(0.5);
-    const tanMid = smp.tangent.clone().add(prev.tangent).normalize();
-    const r0 = new THREE.Vector3().crossVectors(tanMid, new THREE.Vector3(0, 1, 0)).normalize();
-    const u0 = new THREE.Vector3().crossVectors(r0, tanMid).normalize();
-    center.addScaledVector(u0, 2 * smp.tubeR); // seam = top of the circle
-    const m = new THREE.Matrix4().makeBasis(r0, u0, new THREE.Vector3().crossVectors(r0, u0));
-    const q = new THREE.Quaternion().setFromRotationMatrix(m);
-    const seamBody = world.createRigidBody(
-      RAPIER.RigidBodyDesc.fixed()
-        .setTranslation(center.x, center.y, center.z)
-        .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }),
-    );
-    world.createCollider(
-      RAPIER.ColliderDesc.cuboid(0.5, 0.08, segLen / 2 + 0.3),
-      seamBody,
-    );
-  }
+  const mesh = addRibbon(scene, world, RAPIER, track.samples, !!spec.circuit, mat);
 
   // ---- start / finish gates (circuits have one combined lap line) ----
   addGateBar(scene, track, spec.start, new THREE.Color(0.2, 1.8, 2.0));
@@ -424,6 +551,13 @@ export function buildTrack(
   // ---- attachments ----
   const rails: RailLine[] = [];
   for (const att of spec.attachments) buildAttachment(scene, world, RAPIER, track, att, rails);
+
+  // ---- fork branches: own ribbon (shared material) + own attachments ----
+  for (const branch of track.forkBranches) {
+    addRibbon(scene, world, RAPIER, branch.samples, false, mat);
+    const source = new BranchSource(branch.samples, branch.width);
+    for (const att of branch.attachments) buildAttachment(scene, world, RAPIER, source, att, rails);
+  }
 
   return { track, mesh, rails };
 }
@@ -461,7 +595,7 @@ function buildAttachment(
   scene: THREE.Scene,
   world: RAPIER_API.World,
   RAPIER: Rapier,
-  track: Track,
+  track: FrameSource,
   att: Attachment,
   rails: RailLine[],
 ): void {
@@ -499,7 +633,7 @@ function buildAttachment(
       opacity: 0.85,
     });
     const seg = new THREE.Mesh(
-      new THREE.BoxGeometry(track.spec.width * 0.55, 0.08, att.length),
+      new THREE.BoxGeometry(track.width * 0.55, 0.08, att.length),
       mat,
     );
     seg.position.copy(from.pos).add(to.pos).multiplyScalar(0.5);
@@ -512,7 +646,7 @@ function buildAttachment(
     staticBox([1.6, 4, 1.6], pos, f.yaw, 0x2b1152);
   } else if (att.kind === 'gate') {
     const f = track.frameAt(att.at);
-    const hw = track.spec.width / 2;
+    const hw = track.width / 2;
     const wallW = hw - att.opening / 2;
     for (const side of [-1, 1]) {
       const centerOff = side * (att.opening / 2 + wallW / 2);
@@ -551,7 +685,7 @@ function buildAttachment(
     );
     world.createCollider(RAPIER.ColliderDesc.cuboid(0.18, 0.15, att.length / 2), body);
     // posts reach from the local surface up to the rail
-    const hwTrack = track.spec.width / 2;
+    const hwTrack = track.width / 2;
     const u = THREE.MathUtils.clamp(att.offset / hwTrack, -1, 1);
     for (const t of [0.15, 0.5, 0.85]) {
       const fr = track.frameAt(att.at + att.length * t);
