@@ -76,10 +76,12 @@ export async function startGame(): Promise<void> {
   };
 
   function spawnAt(s: number): void {
-    coordinator.forceHover(); // resets always restore normal physics
     const f = track.frameAt(s);
     const yaw = Math.atan2(-f.tangent.x, -f.tangent.z);
     rider.setPose(f.pos.clone().addScaledVector(f.up, 1.8), yaw);
+    // forceHover AFTER the teleport so its nearHint resync (and the HOVER
+    // mode it restores) both reflect where the rider actually landed
+    coordinator.forceHover();
     nearIdx = 0;
     progressS = s;
   }

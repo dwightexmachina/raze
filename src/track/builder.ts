@@ -5,6 +5,10 @@ import type { TrackSpec, Attachment } from './spec';
 type Rapier = typeof RAPIER_API;
 
 const DS = 2; // sample spacing, meters
+// A windowed-search result past this is treated as a stale hint (no
+// legitimate on-track/airborne position is ever this far from its true
+// nearest sample) and triggers a full-scan recovery in Track.nearest().
+const NEAREST_ANOMALY_SQ = 40 * 40;
 
 export interface TrackSample {
   pos: THREE.Vector3;      // world space (baseY applied)
@@ -201,7 +205,11 @@ export class Track {
   }
 
   /** Nearest sample to a world position, searching around a hint index.
-   *  On circuits the search window wraps across the seam. */
+   *  On circuits the search window wraps across the seam. Self-healing:
+   *  if the windowed result is implausibly far (stale hint — e.g. a
+   *  teleport/respawn/mode-transition the caller didn't resync), falls
+   *  back to a full scan so a bad hint corrects itself within one call
+   *  instead of needing every caller to choreograph resyncs correctly. */
   nearest(pos: THREE.Vector3, hintIdx: number): { idx: number; dist: number } {
     const N = this.samples.length;
     let best = hintIdx, bestD = Infinity;
@@ -215,6 +223,13 @@ export class Track {
       const lo = Math.max(0, hintIdx - 60);
       const hi = Math.min(N - 1, hintIdx + 60);
       for (let i = lo; i <= hi; i++) {
+        const d = this.samples[i].pos.distanceToSquared(pos);
+        if (d < bestD) { bestD = d; best = i; }
+      }
+    }
+    if (bestD > NEAREST_ANOMALY_SQ) {
+      bestD = Infinity;
+      for (let i = 0; i < N; i++) {
         const d = this.samples[i].pos.distanceToSquared(pos);
         if (d < bestD) { bestD = d; best = i; }
       }

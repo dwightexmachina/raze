@@ -78,14 +78,20 @@ export class ModeCoordinator {
     return true;
   }
 
-  /** Hard reset (R, respawn): always back to HOVER, cleanly. */
+  /** Hard reset (R, respawn): always back to HOVER, cleanly. Call AFTER
+   *  the rider has been teleported to its new position — nearHint is
+   *  reset to 0 here only as a placeholder; the anomaly fallback in
+   *  Track.nearest() will resync it to the real position on first use
+   *  regardless, but doing it explicitly avoids even one bad-telemetry
+   *  frame right after a respawn deep into the lap. */
   forceHover(): void {
     if (this.active !== this.hover) {
       this.active.exit(this.ctx);
       this.active = this.hover;
       this.hover.enter(this.ctx);
     }
-    this.nearHint = 0;
+    const near = this.ctx.track.nearest(this.ctx.rider.position, this.nearHint);
+    this.nearHint = near.idx;
   }
 
   private switchTo(name: ModeName): void {
