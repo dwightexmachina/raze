@@ -20,7 +20,7 @@ const SPRING_DAMP = 130;
 // progressive stiffening: spring force multiplies by (1 + PROG·ratio²) as
 // compression approaches bottom-out, so high-speed concave transitions and
 // hard landings are absorbed instead of slamming the slab into the deck
-const SPRING_PROG = 2.5;
+const SPRING_PROG = 3.5;
 const THRUST = 2600;
 const BOOST_MULT = 1.9;
 // quadratic aero drag on planar velocity → real terminal speed:
@@ -245,12 +245,13 @@ export class Rider {
       body.addForce({ x: f.x, y: f.y, z: f.z }, true);
     }
 
-    // ---- aero drag (planar only, so jump arcs stay crisp) ----
+    // ---- aero drag (planar only; mostly off in the air so jumps carry) ----
     const planarSpeed = Math.hypot(v.x, v.z);
     this.speed = planarSpeed;
     if (planarSpeed > 0.5) {
+      const k = DRAG_K * (this.grounded ? 1 : 0.2);
       body.addForce(
-        { x: -v.x * DRAG_K * planarSpeed, y: 0, z: -v.z * DRAG_K * planarSpeed },
+        { x: -v.x * k * planarSpeed, y: 0, z: -v.z * k * planarSpeed },
         true,
       );
     }

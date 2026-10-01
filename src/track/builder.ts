@@ -58,7 +58,12 @@ export class Track {
         from: s,
         to: s + length,
       });
-      const n = Math.max(2, Math.ceil(length / DS));
+      // curvature-aware density: keep facet fold angles small so the board
+      // never lands across a sharp crease (hills/ramps bend vertically,
+      // arcs bend by yaw — cap both at roughly a degree per facet)
+      let n = Math.max(2, Math.ceil(length / DS));
+      if (seg.kind === 'hill' || seg.kind === 'ramp') n = Math.max(n, Math.ceil(length / 0.6));
+      if (seg.kind === 'arc') n = Math.max(n, Math.ceil(Math.abs(seg.angle) / 1.2));
       const y0 = y;
 
       for (let i = 1; i <= n; i++) {
@@ -73,7 +78,10 @@ export class Track {
           const b = Math.sin(Math.PI * t);
           y = y0 + seg.height * b * b;
         } else if (seg.kind === 'ramp') {
-          y = y0 + seg.rise * (t * t * (3 - 2 * t));
+          // parabolic kicker: uniform entry curvature (no smoothstep
+          // curvature spike at the base) and full slope AT the lip, so
+          // launch ramps actually launch
+          y = y0 + seg.rise * t * t;
         }
         // roll eases to the segment target over the first half
         const rt = Math.min(1, t / 0.5);
@@ -84,10 +92,18 @@ export class Track {
       if (seg.kind === 'gap') y = 0; // landings return to deck level
     }
 
-    // build frames (central-difference tangents, then roll about the tangent)
+    // build frames (central-difference tangents, then roll about the tangent);
+    // clamp the difference window to the same surfaced run so gap-edge
+    // discontinuities don't tilt the lip/landing frames
     for (let i = 0; i < raw.length; i++) {
-      const a = raw[Math.max(0, i - 1)];
-      const b = raw[Math.min(raw.length - 1, i + 1)];
+      let ia = Math.max(0, i - 1);
+      let ib = Math.min(raw.length - 1, i + 1);
+      if (raw[i].surfaced) {
+        if (!raw[ia].surfaced) ia = i;
+        if (!raw[ib].surfaced) ib = i;
+      }
+      const a = raw[ia];
+      const b = raw[ib === ia ? Math.min(raw.length - 1, i + 1) : ib];
       const tangent = new THREE.Vector3(b.x - a.x, b.y - a.y, b.z - a.z).normalize();
       const r0 = new THREE.Vector3().crossVectors(tangent, new THREE.Vector3(0, 1, 0)).normalize();
       const u0 = new THREE.Vector3().crossVectors(r0, tangent).normalize();
