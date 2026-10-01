@@ -53,6 +53,7 @@ async function boot(): Promise<void> {
   let lastMs: number | null = null;
   let bestMs: number | null = null;
   let onBoostPad = false;
+  let camRadiusClamp = 0; // tighten the chase orbit inside tubes
   const riderTrackInfo = {
     s: 0,             // arclength along the track, meters
     segment: '-',     // named segment at that arclength
@@ -99,6 +100,7 @@ async function boot(): Promise<void> {
       const lateral = pos.clone().sub(smp.pos).dot(smp.right);
       onBoostPad = track.isOnBoost(smp.s, lateral);
 
+      camRadiusClamp = smp.tubeAmt > 0.5 ? smp.tubeR * 0.85 : 0;
       const seg = track.segmentAt(smp.s);
       riderTrackInfo.s = Math.round(smp.s * 10) / 10;
       riderTrackInfo.segment = `${seg.label} [#${seg.index} ${seg.kind} ${Math.round(seg.from)}-${Math.round(seg.to)}m]`;
@@ -269,7 +271,7 @@ async function boot(): Promise<void> {
     rider.syncVisual(input);
     chase.update(
       dt, rider.position, rider.heading, rider.speed,
-      rider.boardUp, rider.travelHeading, !rider.grounded,
+      rider.boardUp, rider.travelHeading, !rider.grounded, camRadiusClamp,
     );
     updateGrid(grid, chase.camera.position);
     updateTrack(trackMesh, chase.camera.position);

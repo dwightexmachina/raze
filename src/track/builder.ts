@@ -16,6 +16,8 @@ export interface TrackSample {
   surfaced: boolean;
   wallL: number;           // cross-section wall heights at this sample
   wallR: number;
+  tubeAmt: number;         // 0 = open profile, 1 = fully closed tube
+  tubeR: number;           // tube radius being morphed toward
 }
 
 /** Cross-section elevation at lateral u ∈ [-1, 1]: flat deck in the middle,
@@ -52,16 +54,21 @@ export class Track {
   private sample(): void {
     const spec = this.spec;
     let x = 0, z = 0, y = 0, yaw = 0, s = 0, roll = 0, wl = 0, wr = 0;
-    const raw: Array<{ x: number; y: number; z: number; roll: number; yaw: number; s: number; surfaced: boolean; wl: number; wr: number }> = [];
-    raw.push({ x, y, z, roll, yaw, s, surfaced: true, wl, wr });
+    let tubeAmt = 0, tubeR = 7;
+    const raw: Array<{ x: number; y: number; z: number; roll: number; yaw: number; s: number; surfaced: boolean; wl: number; wr: number; tubeAmt: number; tubeR: number }> = [];
+    raw.push({ x, y, z, roll, yaw, s, surfaced: true, wl, wr, tubeAmt, tubeR });
 
     for (let si = 0; si < spec.segments.length; si++) {
       const seg = spec.segments[si];
       const rollStart = roll;
       const rollTarget = seg.kind === 'gap' ? roll : ((seg as { roll?: number }).roll ?? 0);
+      const twistRad = THREE.MathUtils.degToRad(seg.twist ?? 0);
       const wlStart = wl, wrStart = wr;
       const wlTarget = seg.kind === 'gap' ? wl : (seg.wallL ?? 0);
       const wrTarget = seg.kind === 'gap' ? wr : (seg.wallR ?? 0);
+      const tubeStart = tubeAmt;
+      const tubeTarget = seg.kind === 'gap' ? tubeAmt : (seg.tube ? 1 : 0);
+      if (seg.tube) tubeR = seg.tube;
       const length = seg.kind === 'arc'
         ? Math.abs(THREE.MathUtils.degToRad(seg.angle)) * seg.radius
         : seg.length;
@@ -78,6 +85,9 @@ export class Track {
       let n = Math.max(2, Math.ceil(length / DS));
       if (seg.kind === 'hill' || seg.kind === 'ramp') n = Math.max(n, Math.ceil(length / 0.6));
       if (seg.kind === 'arc') n = Math.max(n, Math.ceil(Math.abs(seg.angle) / 1.2));
+      // twist rotates the tube's facet pattern — sample finely so the
+      // interior ridges spiral smoothly instead of jumping per ring
+      if (seg.twist) n = Math.max(n, Math.ceil(Math.abs(seg.twist) / 1.5));
       const y0 = y;
 
       for (let i = 1; i <= n; i++) {
@@ -97,15 +107,21 @@ export class Track {
           // launch ramps actually launch
           y = y0 + seg.rise * t * t;
         }
-        // roll and wall heights ease to the segment target over the first half
+        // roll, walls, and tube morph ease to targets over the first half;
+        // twist adds linearly across the whole segment
         const rt = Math.min(1, t / 0.5);
         const ease = rt * rt * (3 - 2 * rt);
-        roll = THREE.MathUtils.lerp(rollStart, THREE.MathUtils.degToRad(rollTarget), ease);
+        roll = THREE.MathUtils.lerp(rollStart, THREE.MathUtils.degToRad(rollTarget), ease)
+          + twistRad * t;
         wl = THREE.MathUtils.lerp(wlStart, wlTarget, ease);
         wr = THREE.MathUtils.lerp(wrStart, wrTarget, ease);
+        tubeAmt = THREE.MathUtils.lerp(tubeStart, tubeTarget, ease);
         s += ds;
-        raw.push({ x, y, z, roll, yaw, s, surfaced: seg.kind !== 'gap', wl, wr });
+        raw.push({ x, y, z, roll, yaw, s, surfaced: seg.kind !== 'gap', wl, wr, tubeAmt, tubeR });
       }
+      // keep roll wrapped so a 360° twist doesn't unwind through the
+      // next segment's ease back to 0
+      roll = Math.atan2(Math.sin(roll), Math.cos(roll));
       if (seg.kind === 'gap') y = 0; // landings return to deck level
     }
 
@@ -135,6 +151,8 @@ export class Track {
         surfaced: raw[i].surfaced,
         wallL: raw[i].wl,
         wallR: raw[i].wr,
+        tubeAmt: raw[i].tubeAmt,
+        tubeR: raw[i].tubeR,
       });
     }
 
@@ -204,20 +222,40 @@ export function buildTrack(
   const S = track.samples;
 
   // ---- profile-swept mesh + trimesh collider over surfaced runs ----
-  // Each sample sweeps a cross-section: flat deck center, walls rising at
-  // the edges per the sample's wallL/wallR. 13 vertices across.
-  const ACROSS = 13;
-  const positions: number[] = [];
+  // Each sample sweeps a cross-section: flat deck with walls, blended
+  // toward a full cylinder when the sample is inside a tube morph.
+  // 29 vertices across keeps tube interior facets shallow (~13°).
+  const ACROSS = 29;
+  const positions: number[] = [];    // visual: rolled frame (seam spirals)
+  const colPositions: number[] = []; // collider: tube part UNROLLED —
+  // a twisted cylinder is geometrically identical to an untwisted one,
+  // but a twisted POLYGON's interior ridges rotate like an auger and
+  // drag the rider around the tube. Physics rides the stationary polygon.
   const uvs: number[] = [];
   const indices: number[] = [];
+  const Y = new THREE.Vector3(0, 1, 0);
   for (let i = 0; i < S.length; i++) {
     const smp = S[i];
+    const r0 = new THREE.Vector3().crossVectors(smp.tangent, Y).normalize();
+    const u0 = new THREE.Vector3().crossVectors(r0, smp.tangent).normalize();
     for (let j = 0; j < ACROSS; j++) {
       const u = (j / (ACROSS - 1)) * 2 - 1;
+      const flatLat = u * hw;
+      const flatEl = wallElev(u, smp.wallL, smp.wallR);
+      const theta = u * Math.PI;
+      const tubeLat = Math.sin(theta) * smp.tubeR;
+      const tubeEl = (1 - Math.cos(theta)) * smp.tubeR;
+      const a = smp.tubeAmt;
       const p = smp.pos.clone()
-        .addScaledVector(smp.right, u * hw)
-        .addScaledVector(smp.up, wallElev(u, smp.wallL, smp.wallR));
+        .addScaledVector(smp.right, flatLat * (1 - a) + tubeLat * a)
+        .addScaledVector(smp.up, flatEl * (1 - a) + tubeEl * a);
       positions.push(p.x, p.y, p.z);
+      const c = smp.pos.clone()
+        .addScaledVector(smp.right, flatLat * (1 - a))
+        .addScaledVector(smp.up, flatEl * (1 - a))
+        .addScaledVector(r0, tubeLat * a)
+        .addScaledVector(u0, tubeEl * a);
+      colPositions.push(c.x, c.y, c.z);
       uvs.push(j / (ACROSS - 1), smp.s);
     }
     if (i > 0 && smp.surfaced && S[i - 1].surfaced) {
@@ -284,9 +322,34 @@ export function buildTrack(
 
   const body = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
   world.createCollider(
-    RAPIER.ColliderDesc.trimesh(new Float32Array(positions), new Uint32Array(indices)),
+    RAPIER.ColliderDesc.trimesh(new Float32Array(colPositions), new Uint32Array(indices)),
     body,
   );
+
+  // seal the collider tube's seam: with the unrolled collider the seam
+  // crack sits fixed at the TOP of the tube; thin boxes close it so a
+  // rider carving over the top can't slip through the zero-width crack
+  for (let i = 1; i < S.length; i++) {
+    const smp = S[i], prev = S[i - 1];
+    if (!(smp.surfaced && smp.tubeAmt > 0.9 && prev.tubeAmt > 0.9)) continue;
+    const segLen = smp.pos.distanceTo(prev.pos);
+    const center = smp.pos.clone().add(prev.pos).multiplyScalar(0.5);
+    const tanMid = smp.tangent.clone().add(prev.tangent).normalize();
+    const r0 = new THREE.Vector3().crossVectors(tanMid, new THREE.Vector3(0, 1, 0)).normalize();
+    const u0 = new THREE.Vector3().crossVectors(r0, tanMid).normalize();
+    center.addScaledVector(u0, 2 * smp.tubeR); // seam = top of the circle
+    const m = new THREE.Matrix4().makeBasis(r0, u0, new THREE.Vector3().crossVectors(r0, u0));
+    const q = new THREE.Quaternion().setFromRotationMatrix(m);
+    const seamBody = world.createRigidBody(
+      RAPIER.RigidBodyDesc.fixed()
+        .setTranslation(center.x, center.y, center.z)
+        .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }),
+    );
+    world.createCollider(
+      RAPIER.ColliderDesc.cuboid(0.5, 0.08, segLen / 2 + 0.3),
+      seamBody,
+    );
+  }
 
   // ---- start / finish gates ----
   addGateBar(scene, track, spec.start, new THREE.Color(0.2, 1.8, 2.0));

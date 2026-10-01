@@ -121,6 +121,7 @@ export class ChaseCamera {
     surfaceUp?: THREE.Vector3,
     travel?: THREE.Vector3,
     airborne = false,
+    radiusClamp = 0, // >0: cap orbit radius (e.g. inside a tube)
   ): void {
     const p = this.preset;
     let desired: THREE.Vector3;
@@ -162,11 +163,12 @@ export class ChaseCamera {
         MIN_POLAR,
         MAX_POLAR,
       );
-      const radius = THREE.MathUtils.clamp(
+      let radius = THREE.MathUtils.clamp(
         p.radius * this.radiusScale * (1 + this.airBlend * 0.15),
         MIN_RADIUS,
         MAX_RADIUS,
       );
+      if (radiusClamp > 0) radius = Math.min(radius, radiusClamp);
       this.effAzimuth = azimuth;
       this.effPolar = polar;
       this.effRadius = radius;

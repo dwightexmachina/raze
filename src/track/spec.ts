@@ -22,6 +22,12 @@ export type Segment = (
    *  ease in over the segment like roll does. */
   wallL?: number;
   wallR?: number;
+  /** Full-tube radius: the cross-section closes into a cylinder of this
+   *  radius (rider rides the inside). Morphs in/out over the segment. */
+  tube?: number;
+  /** Extra roll applied linearly across the segment, degrees — corkscrews.
+   *  Inside a tube the geometry is invariant; the seam and dashes spiral. */
+  twist?: number;
 };
 
 export type Attachment =
@@ -87,7 +93,7 @@ export const PIPELINE: TrackSpec = {
   width: 16,
   baseY: 8,
   start: 12,
-  finish: 610,
+  finish: 815,
   segments: [
     { kind: 'straight', length: 60, label: 'start straight' },                      //   0- 60
     { kind: 'straight', length: 60, wallR: 7, label: 'wall alley' },                //  60-120
@@ -95,21 +101,26 @@ export const PIPELINE: TrackSpec = {
     { kind: 'straight', length: 40, label: 'wall release' },                        // 181-221
     { kind: 'straight', length: 70, wallL: 6, wallR: 6, label: 'half-pipe' },       // 221-291
     { kind: 'straight', length: 30, label: 'pipe exit' },                           // 291-321
-    { kind: 'ramp', length: 20, rise: 3.5, label: 'kicker' },                       // 321-341
-    { kind: 'gap', length: 16, label: 'void gap 1' },                               // 341-357
-    { kind: 'straight', length: 50, label: 'landing + rail' },                      // 357-407
-    { kind: 'arc', radius: 90, angle: -45, roll: -24, label: 'banked sweeper R' },  // 407-478
-    { kind: 'straight', length: 40, label: 'run-up' },                              // 478-518
-    { kind: 'ramp', length: 24, rise: 5, label: 'big air' },                        // 518-542
-    { kind: 'gap', length: 22, label: 'void gap 2' },                               // 542-564
-    { kind: 'straight', length: 70, label: 'finish straight' },                     // 564-634
+    { kind: 'straight', length: 25, label: 'tube approach' },                       // 321-346
+    { kind: 'straight', length: 40, tube: 7, label: 'tube mouth' },                 // 346-386
+    { kind: 'straight', length: 70, tube: 7, twist: 360, label: 'corkscrew' },      // 386-456
+    { kind: 'arc', radius: 80, angle: -30, tube: 7, label: 'tube bend R' },         // 456-498
+    { kind: 'straight', length: 30, label: 'tube exit' },                           // 498-528
+    { kind: 'ramp', length: 20, rise: 3.5, label: 'kicker' },                       // 528-548
+    { kind: 'gap', length: 16, label: 'void gap 1' },                               // 548-564
+    { kind: 'straight', length: 50, label: 'landing + rail' },                      // 564-614
+    { kind: 'arc', radius: 90, angle: -45, roll: -24, label: 'banked sweeper R' },  // 614-685
+    { kind: 'straight', length: 40, label: 'run-up' },                              // 685-725
+    { kind: 'ramp', length: 24, rise: 5, label: 'big air' },                        // 725-749
+    { kind: 'gap', length: 22, label: 'void gap 2' },                               // 749-771
+    { kind: 'straight', length: 70, label: 'finish straight' },                     // 771-841
   ],
   attachments: [
     { kind: 'boost', at: 38, length: 10 },
     { kind: 'rail', at: 234, length: 46, offset: -8, height: 6.4 },  // half-pipe lip grind
-    { kind: 'rail', at: 366, length: 34, offset: 5, height: 0.8 },   // landing ground rail
-    { kind: 'boost', at: 494, length: 10 },
-    { kind: 'pylon', at: 580, offset: -3.5 },
-    { kind: 'pylon', at: 594, offset: 3.5 },
+    { kind: 'rail', at: 572, length: 34, offset: 5, height: 0.8 },   // landing ground rail
+    { kind: 'boost', at: 700, length: 10 },
+    { kind: 'pylon', at: 785, offset: -3.5 },
+    { kind: 'pylon', at: 799, offset: 3.5 },
   ],
 };
