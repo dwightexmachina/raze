@@ -58,6 +58,8 @@ export class ChaseCamera {
 
   private currentPos = new THREE.Vector3(0, 6, 40);
   private currentLook = new THREE.Vector3();
+  // smoothed surface up — the camera rolls with walls and pipes
+  private effUp = new THREE.Vector3(0, 1, 0);
   // effective values from the last update, for the metadata readout
   private effAzimuth = 0;
   private effPolar = 0;
@@ -106,10 +108,26 @@ export class ChaseCamera {
     );
   }
 
-  update(dt: number, target: THREE.Vector3, heading: THREE.Vector3, speed: number): void {
+  update(
+    dt: number,
+    target: THREE.Vector3,
+    heading: THREE.Vector3,
+    speed: number,
+    surfaceUp?: THREE.Vector3,
+  ): void {
     const p = this.preset;
     let desired: THREE.Vector3;
     let look: THREE.Vector3;
+
+    // roll the whole rig with the riding surface (mostly — keep a bias
+    // toward world-up so mild banks don't feel like the world is tilting)
+    const targetUp = surfaceUp
+      ? surfaceUp.clone().lerp(new THREE.Vector3(0, 1, 0), 0.3).normalize()
+      : new THREE.Vector3(0, 1, 0);
+    this.effUp.lerp(targetUp, 1 - Math.exp(-dt * 3.5)).normalize();
+    const frameQ = new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(0, 1, 0), this.effUp,
+    );
 
     if (p.fpv) {
       // board cam: perched above the nose, looking down the line of travel;
@@ -140,17 +158,18 @@ export class ChaseCamera {
       const baseA = Math.atan2(-heading.x, -heading.z);
       const a = baseA + azimuth;
       const sinP = Math.sin(polar);
-      desired = target.clone().add(new THREE.Vector3(
+      const offset = new THREE.Vector3(
         Math.sin(a) * sinP * radius,
         Math.cos(polar) * radius,
         Math.cos(a) * sinP * radius,
-      ));
+      ).applyQuaternion(frameQ); // orbit in the rolled frame
+      desired = target.clone().add(offset);
 
       // look ahead when behind the rider, at the rider when off to the side
       const aheadAmount = Math.max(Math.cos(azimuth), 0) * p.lookAhead;
       look = target.clone()
         .addScaledVector(heading, aheadAmount)
-        .add(new THREE.Vector3(0, 1.2, 0));
+        .addScaledVector(this.effUp, 1.2);
     }
 
     const followRate = this.isManual && !p.fpv ? Math.max(p.followRate, 12) : p.followRate;
@@ -160,6 +179,7 @@ export class ChaseCamera {
     this.currentLook.lerp(look, lookAlpha);
 
     this.camera.position.copy(this.currentPos);
+    this.camera.up.copy(this.effUp);
     this.camera.lookAt(this.currentLook);
 
     const targetFov = p.baseFov + Math.min(speed / 45, 1) * p.fovKick;

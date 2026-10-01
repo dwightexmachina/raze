@@ -15,13 +15,20 @@ export type Segment = (
   | { kind: 'hill'; length: number; height: number }
   | { kind: 'ramp'; length: number; rise: number }
   | { kind: 'gap'; length: number }
-) & { label?: string };
+) & {
+  label?: string;
+  /** Wall heights per side — the cross-section profile. 0 = flat deck edge;
+   *  ~6-7 = ridable wall. Both sides raised = half-pipe channel. Values
+   *  ease in over the segment like roll does. */
+  wallL?: number;
+  wallR?: number;
+};
 
 export type Attachment =
   | { kind: 'boost'; at: number; length: number }
   | { kind: 'pylon'; at: number; offset: number }
   | { kind: 'gate'; at: number; opening: number }
-  | { kind: 'rail'; at: number; length: number; offset: number };
+  | { kind: 'rail'; at: number; length: number; offset: number; height?: number };
 
 export interface TrackSpec {
   name: string;
@@ -70,5 +77,39 @@ export const GAUNTLET_PLUS: TrackSpec = {
     { kind: 'pylon', at: 626, offset: -3.5 },
     { kind: 'pylon', at: 638, offset: 3.5 },
     { kind: 'gate', at: 658, opening: 7 },
+  ],
+};
+
+/** Second map: wall-rides, a half-pipe with a lip rail, and grind rails.
+ *  Exercises the cross-section profile system end to end. */
+export const PIPELINE: TrackSpec = {
+  name: 'PIPELINE',
+  width: 16,
+  baseY: 8,
+  start: 12,
+  finish: 610,
+  segments: [
+    { kind: 'straight', length: 60, label: 'start straight' },                      //   0- 60
+    { kind: 'straight', length: 60, wallR: 7, label: 'wall alley' },                //  60-120
+    { kind: 'arc', radius: 100, angle: 35, wallR: 7, label: 'wall carve L' },       // 120-181
+    { kind: 'straight', length: 40, label: 'wall release' },                        // 181-221
+    { kind: 'straight', length: 70, wallL: 6, wallR: 6, label: 'half-pipe' },       // 221-291
+    { kind: 'straight', length: 30, label: 'pipe exit' },                           // 291-321
+    { kind: 'ramp', length: 20, rise: 3.5, label: 'kicker' },                       // 321-341
+    { kind: 'gap', length: 16, label: 'void gap 1' },                               // 341-357
+    { kind: 'straight', length: 50, label: 'landing + rail' },                      // 357-407
+    { kind: 'arc', radius: 90, angle: -45, roll: -24, label: 'banked sweeper R' },  // 407-478
+    { kind: 'straight', length: 40, label: 'run-up' },                              // 478-518
+    { kind: 'ramp', length: 24, rise: 5, label: 'big air' },                        // 518-542
+    { kind: 'gap', length: 22, label: 'void gap 2' },                               // 542-564
+    { kind: 'straight', length: 70, label: 'finish straight' },                     // 564-634
+  ],
+  attachments: [
+    { kind: 'boost', at: 38, length: 10 },
+    { kind: 'rail', at: 234, length: 46, offset: -8, height: 6.4 },  // half-pipe lip grind
+    { kind: 'rail', at: 366, length: 34, offset: 5, height: 0.8 },   // landing ground rail
+    { kind: 'boost', at: 494, length: 10 },
+    { kind: 'pylon', at: 580, offset: -3.5 },
+    { kind: 'pylon', at: 594, offset: 3.5 },
   ],
 };

@@ -259,7 +259,9 @@ export class Rider {
     // ---- carve steering: torque + speed-scaled effectiveness ----
     if (input.steer !== 0) {
       const authority = this.grounded ? 1 : 0.45; // some air control
-      body.addTorque({ x: 0, y: YAW_TORQUE * input.steer * authority, z: 0 }, true);
+      // yaw around the BOARD's up axis, so carving works on walls and pipes
+      const tq = YAW_TORQUE * input.steer * authority;
+      body.addTorque({ x: up.x * tq, y: up.y * tq, z: up.z * tq }, true);
     }
 
     // ---- lateral grip: carve, don't slide ----
@@ -303,6 +305,12 @@ export class Rider {
   get position(): THREE.Vector3 {
     const p = this.body.translation();
     return new THREE.Vector3(p.x, p.y, p.z);
+  }
+
+  get boardUp(): THREE.Vector3 {
+    const r = this.body.rotation();
+    return new THREE.Vector3(0, 1, 0)
+      .applyQuaternion(new THREE.Quaternion(r.x, r.y, r.z, r.w));
   }
 
   get heading(): THREE.Vector3 {

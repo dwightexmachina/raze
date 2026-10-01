@@ -14,6 +14,17 @@ export interface TrackSample {
   yaw: number;
   s: number;
   surfaced: boolean;
+  wallL: number;           // cross-section wall heights at this sample
+  wallR: number;
+}
+
+/** Cross-section elevation at lateral u ∈ [-1, 1]: flat deck in the middle,
+ *  parabolic rise into the walls over the outer 38% of each half. */
+export function wallElev(u: number, wallL: number, wallR: number): number {
+  const m = Math.abs(u);
+  if (m <= 0.62) return 0;
+  const k = (m - 0.62) / 0.38;
+  return (u < 0 ? wallL : wallR) * k * k;
 }
 
 interface BoostZone { from: number; to: number }
@@ -40,14 +51,17 @@ export class Track {
   /** Turtle-walk the segments into world-space samples with rolled frames. */
   private sample(): void {
     const spec = this.spec;
-    let x = 0, z = 0, y = 0, yaw = 0, s = 0, roll = 0;
-    const raw: Array<{ x: number; y: number; z: number; roll: number; yaw: number; s: number; surfaced: boolean }> = [];
-    raw.push({ x, y, z, roll, yaw, s, surfaced: true });
+    let x = 0, z = 0, y = 0, yaw = 0, s = 0, roll = 0, wl = 0, wr = 0;
+    const raw: Array<{ x: number; y: number; z: number; roll: number; yaw: number; s: number; surfaced: boolean; wl: number; wr: number }> = [];
+    raw.push({ x, y, z, roll, yaw, s, surfaced: true, wl, wr });
 
     for (let si = 0; si < spec.segments.length; si++) {
       const seg = spec.segments[si];
       const rollStart = roll;
       const rollTarget = seg.kind === 'gap' ? roll : ((seg as { roll?: number }).roll ?? 0);
+      const wlStart = wl, wrStart = wr;
+      const wlTarget = seg.kind === 'gap' ? wl : (seg.wallL ?? 0);
+      const wrTarget = seg.kind === 'gap' ? wr : (seg.wallR ?? 0);
       const length = seg.kind === 'arc'
         ? Math.abs(THREE.MathUtils.degToRad(seg.angle)) * seg.radius
         : seg.length;
@@ -83,11 +97,14 @@ export class Track {
           // launch ramps actually launch
           y = y0 + seg.rise * t * t;
         }
-        // roll eases to the segment target over the first half
+        // roll and wall heights ease to the segment target over the first half
         const rt = Math.min(1, t / 0.5);
-        roll = THREE.MathUtils.lerp(rollStart, THREE.MathUtils.degToRad(rollTarget), rt * rt * (3 - 2 * rt));
+        const ease = rt * rt * (3 - 2 * rt);
+        roll = THREE.MathUtils.lerp(rollStart, THREE.MathUtils.degToRad(rollTarget), ease);
+        wl = THREE.MathUtils.lerp(wlStart, wlTarget, ease);
+        wr = THREE.MathUtils.lerp(wrStart, wrTarget, ease);
         s += ds;
-        raw.push({ x, y, z, roll, yaw, s, surfaced: seg.kind !== 'gap' });
+        raw.push({ x, y, z, roll, yaw, s, surfaced: seg.kind !== 'gap', wl, wr });
       }
       if (seg.kind === 'gap') y = 0; // landings return to deck level
     }
@@ -116,6 +133,8 @@ export class Track {
         yaw: raw[i].yaw,
         s: raw[i].s,
         surfaced: raw[i].surfaced,
+        wallL: raw[i].wl,
+        wallR: raw[i].wr,
       });
     }
 
@@ -176,22 +195,29 @@ export function buildTrack(
   const hw = spec.width / 2;
   const S = track.samples;
 
-  // ---- ribbon mesh + trimesh collider over surfaced runs ----
+  // ---- profile-swept mesh + trimesh collider over surfaced runs ----
+  // Each sample sweeps a cross-section: flat deck center, walls rising at
+  // the edges per the sample's wallL/wallR. 13 vertices across.
+  const ACROSS = 13;
   const positions: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
-  let vi = 0;
   for (let i = 0; i < S.length; i++) {
     const smp = S[i];
-    const L = smp.pos.clone().addScaledVector(smp.right, -hw);
-    const R = smp.pos.clone().addScaledVector(smp.right, hw);
-    positions.push(L.x, L.y, L.z, R.x, R.y, R.z);
-    uvs.push(0, smp.s, 1, smp.s);
-    if (i > 0 && smp.surfaced && S[i - 1].surfaced) {
-      const a = vi - 2, b = vi - 1, c = vi, d = vi + 1;
-      indices.push(a, b, c, b, d, c);
+    for (let j = 0; j < ACROSS; j++) {
+      const u = (j / (ACROSS - 1)) * 2 - 1;
+      const p = smp.pos.clone()
+        .addScaledVector(smp.right, u * hw)
+        .addScaledVector(smp.up, wallElev(u, smp.wallL, smp.wallR));
+      positions.push(p.x, p.y, p.z);
+      uvs.push(j / (ACROSS - 1), smp.s);
     }
-    vi += 2;
+    if (i > 0 && smp.surfaced && S[i - 1].surfaced) {
+      const row = i * ACROSS, prev = (i - 1) * ACROSS;
+      for (let j = 0; j < ACROSS - 1; j++) {
+        indices.push(prev + j, prev + j + 1, row + j, prev + j + 1, row + j + 1, row + j);
+      }
+    }
   }
 
   const geo = new THREE.BufferGeometry();
@@ -357,9 +383,10 @@ function buildAttachment(
   } else if (att.kind === 'rail') {
     const from = track.frameAt(att.at);
     const to = track.frameAt(att.at + att.length);
+    const h = att.height ?? 0.8;
     const mid = from.pos.clone().add(to.pos).multiplyScalar(0.5)
       .addScaledVector(from.right, att.offset);
-    mid.y += 0.8;
+    mid.y += h;
     const mesh = new THREE.Mesh(
       new THREE.BoxGeometry(0.35, 0.3, att.length),
       new THREE.MeshBasicMaterial({ color: new THREE.Color(0.2, 1.7, 1.9) }),
@@ -373,15 +400,20 @@ function buildAttachment(
         .setRotation({ x: mesh.quaternion.x, y: mesh.quaternion.y, z: mesh.quaternion.z, w: mesh.quaternion.w }),
     );
     world.createCollider(RAPIER.ColliderDesc.cuboid(0.18, 0.15, att.length / 2), body);
-    // posts
+    // posts reach from the local surface up to the rail
+    const hwTrack = track.spec.width / 2;
+    const u = THREE.MathUtils.clamp(att.offset / hwTrack, -1, 1);
     for (const t of [0.15, 0.5, 0.85]) {
-      const p = from.pos.clone().lerp(to.pos, t).addScaledVector(from.right, att.offset);
+      const fr = track.frameAt(att.at + att.length * t);
+      const surfaceH = wallElev(u, fr.wallL, fr.wallR);
+      const postH = Math.max(0.3, h - surfaceH);
+      const p = fr.pos.clone().addScaledVector(fr.right, att.offset);
       const post = new THREE.Mesh(
-        new THREE.BoxGeometry(0.25, 0.8, 0.25),
+        new THREE.BoxGeometry(0.25, postH, 0.25),
         new THREE.MeshBasicMaterial({ color: 0x1a0b33 }),
       );
       post.position.copy(p);
-      post.position.y += 0.4;
+      post.position.y += surfaceH + postH / 2;
       scene.add(post);
     }
   }
