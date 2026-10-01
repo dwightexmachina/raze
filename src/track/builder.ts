@@ -18,6 +18,7 @@ export interface TrackSample {
   wallR: number;
   tubeAmt: number;         // 0 = open profile, 1 = fully closed tube
   tubeR: number;           // tube radius being morphed toward
+  roll: number;            // frame roll, radians (twist spirals the UVs)
 }
 
 /** Cross-section elevation at lateral u ∈ [-1, 1]: flat deck in the middle,
@@ -153,6 +154,7 @@ export class Track {
         wallR: raw[i].wr,
         tubeAmt: raw[i].tubeAmt,
         tubeR: raw[i].tubeR,
+        roll: raw[i].roll,
       });
     }
 
@@ -226,11 +228,14 @@ export function buildTrack(
   // toward a full cylinder when the sample is inside a tube morph.
   // 29 vertices across keeps tube interior facets shallow (~13°).
   const ACROSS = 29;
-  const positions: number[] = [];    // visual: rolled frame (seam spirals)
-  const colPositions: number[] = []; // collider: tube part UNROLLED —
-  // a twisted cylinder is geometrically identical to an untwisted one,
-  // but a twisted POLYGON's interior ridges rotate like an auger and
-  // drag the rider around the tube. Physics rides the stationary polygon.
+  // ONE geometry for visual and collider, with the tube portion built in
+  // the UNROLLED frame. Two reasons: a twisted POLYGON's interior ridges
+  // rotate like an auger (physics must ride a stationary cylinder), and
+  // the tube circle's axis sits a radius above the centerline — rolling
+  // the frame would crank that axis around the spline and swing the tube
+  // away from where physics says it is. Twist instead spirals the UVs,
+  // so the seam light and dashes corkscrew while the steel stays put.
+  const positions: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
   const Y = new THREE.Vector3(0, 1, 0);
@@ -247,16 +252,12 @@ export function buildTrack(
       const tubeEl = (1 - Math.cos(theta)) * smp.tubeR;
       const a = smp.tubeAmt;
       const p = smp.pos.clone()
-        .addScaledVector(smp.right, flatLat * (1 - a) + tubeLat * a)
-        .addScaledVector(smp.up, flatEl * (1 - a) + tubeEl * a);
-      positions.push(p.x, p.y, p.z);
-      const c = smp.pos.clone()
         .addScaledVector(smp.right, flatLat * (1 - a))
         .addScaledVector(smp.up, flatEl * (1 - a))
         .addScaledVector(r0, tubeLat * a)
         .addScaledVector(u0, tubeEl * a);
-      colPositions.push(c.x, c.y, c.z);
-      uvs.push(j / (ACROSS - 1), smp.s);
+      positions.push(p.x, p.y, p.z);
+      uvs.push(j / (ACROSS - 1) + (a * smp.roll) / (Math.PI * 2), smp.s);
     }
     if (i > 0 && smp.surfaced && S[i - 1].surfaced) {
       const row = i * ACROSS, prev = (i - 1) * ACROSS;
@@ -294,13 +295,14 @@ export function buildTrack(
         vec3 cyan = vec3(0.0, 0.94, 1.0);
         vec3 magenta = vec3(1.0, 0.18, 0.53);
 
-        // glowing rails at the edges
-        float d = min(vUv.x, 1.0 - vUv.x);
+        // glowing rails at the edges (x wraps: twist spirals it around tubes)
+        float x = fract(vUv.x);
+        float d = min(x, 1.0 - x);
         float edge = 1.0 - smoothstep(0.0, 0.05, d);
         vec3 col = mix(surface, cyan * 1.7, edge);
 
         // magenta center dashes
-        float center = 1.0 - smoothstep(0.0, 0.018, abs(vUv.x - 0.5));
+        float center = 1.0 - smoothstep(0.0, 0.018, abs(x - 0.5));
         float dash = step(fract(vUv.y / 9.0), 0.5);
         col = mix(col, magenta * 1.1, center * dash * 0.7);
 
@@ -322,7 +324,7 @@ export function buildTrack(
 
   const body = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
   world.createCollider(
-    RAPIER.ColliderDesc.trimesh(new Float32Array(colPositions), new Uint32Array(indices)),
+    RAPIER.ColliderDesc.trimesh(new Float32Array(positions), new Uint32Array(indices)),
     body,
   );
 
