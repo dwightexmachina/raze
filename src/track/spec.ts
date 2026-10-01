@@ -50,6 +50,12 @@ export interface TrackSpec {
    *  opposing straights + arcs summing to 360°, elevation net zero).
    *  The seam is welded, progress wraps, and timing becomes laps. */
   circuit?: boolean;
+  /** Default wall height (meters) applied to every segment that doesn't
+   *  specify its own wallL/wallR — a gentle curb so drifting wide bumps
+   *  you back toward center instead of off the edge. Segments with an
+   *  explicit wallL/wallR (including 0, to deliberately keep a sheer
+   *  drop) override this. */
+  ambientCurb?: number;
   segments: Segment[];
   attachments: Attachment[];
 }
@@ -62,6 +68,7 @@ export const GAUNTLET_PLUS: TrackSpec = {
   baseY: 8,
   start: 12,
   finish: 753,
+  ambientCurb: 1.2,
   segments: [
     { kind: 'straight', length: 80, label: 'start straight' },        //   0- 80
     { kind: 'hill', length: 52, height: 2.5, label: 'crest' },        //  80-132 (eased for top speed)
@@ -102,6 +109,7 @@ export const PIPELINE: TrackSpec = {
   baseY: 8,
   start: 12,
   finish: 815,
+  ambientCurb: 1.2,
   segments: [
     { kind: 'straight', length: 60, label: 'start straight' },                      //   0- 60
     { kind: 'straight', length: 60, wallR: 7, label: 'wall alley' },                //  60-120
@@ -170,6 +178,7 @@ export const OUROBOROS: TrackSpec = {
   start: 8,
   finish: 8,
   circuit: true,
+  ambientCurb: 1.2,
   segments: [
     // ---- front straight (380 m) ----
     { kind: 'straight', length: 40, label: 'start/finish' },                      //    0-  40

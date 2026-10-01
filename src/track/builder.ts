@@ -70,8 +70,9 @@ export class Track {
       const rollTarget = seg.kind === 'gap' ? roll : ((seg as { roll?: number }).roll ?? 0);
       const twistRad = THREE.MathUtils.degToRad(seg.twist ?? 0);
       const wlStart = wl, wrStart = wr;
-      const wlTarget = seg.kind === 'gap' ? wl : (seg.wallL ?? 0);
-      const wrTarget = seg.kind === 'gap' ? wr : (seg.wallR ?? 0);
+      const curb = spec.ambientCurb ?? 0;
+      const wlTarget = seg.kind === 'gap' ? wl : (seg.wallL ?? curb);
+      const wrTarget = seg.kind === 'gap' ? wr : (seg.wallR ?? curb);
       const widthStart = width;
       const widthTarget = seg.kind === 'gap' ? width : (seg.width ?? spec.width);
       const tubeStart = tubeAmt;

@@ -87,6 +87,38 @@ export async function startGame(): Promise<void> {
   }
   spawnAt(SPAWN_S);
 
+  const FALL_MARGIN = 5; // meters below the local deck (along its normal)
+  const MAX_SURFACE_SCAN = 200; // samples to walk back looking for deck
+
+  /** A stumble, not a crash: teleport to the nearest rideable point on the
+   *  deck (walking back from a void-gap landing to its takeoff edge) and
+   *  keep some forward speed, so recovering from a small mistake is a
+   *  near-instant bump-back rather than a trip to the last checkpoint. */
+  function recoverLocally(near: { idx: number }, priorSpeed: number): void {
+    let idx = near.idx;
+    let steps = 0;
+    while (!track.samples[idx].surfaced && steps < MAX_SURFACE_SCAN) {
+      idx = idx > 0 ? idx - 1 : track.samples.length - 1;
+      steps++;
+    }
+    if (!track.samples[idx].surfaced) {
+      // degenerate case (no deck found nearby) — fall back to the checkpoint
+      spawnAt(Math.max(SPAWN_S, checkpointS - 4));
+      return;
+    }
+    const smp = track.samples[idx];
+    const yaw = Math.atan2(-smp.tangent.x, -smp.tangent.z);
+    rider.setPose(smp.pos.clone().addScaledVector(smp.up, 1.8), yaw);
+    const keepSpeed = THREE.MathUtils.clamp(priorSpeed * 0.6, 6, 20);
+    rider.body.setLinvel(
+      { x: smp.tangent.x * keepSpeed, y: 0, z: smp.tangent.z * keepSpeed },
+      true,
+    );
+    coordinator.forceHover();
+    nearIdx = idx;
+    checkpointS = smp.s;
+  }
+
   function trackLogic(): void {
     const pos = rider.position;
     const near = track.nearest(pos, nearIdx);
@@ -143,9 +175,14 @@ export async function startGame(): Promise<void> {
     }
     riderTrackInfo.rideMode = coordinator.modeName;
     riderTrackInfo.checkpointS = Math.round(checkpointS * 10) / 10;
-    // fell into the void → back to the last checkpoint
-    if (pos.y < track.spec.baseY - 10) {
-      spawnAt(Math.max(SPAWN_S, checkpointS - 4));
+    // fell below the LOCAL deck (measured along its normal, so banked
+    // turns and the tall tube sections don't need a one-size threshold —
+    // only applies in HOVER: GRIND/TUBE own their own transitions)
+    if (coordinator.modeName === 'HOVER') {
+      const belowDeck = _diff.copy(pos).sub(smp.pos).dot(smp.up);
+      if (belowDeck < -FALL_MARGIN) {
+        recoverLocally(near, rider.speed);
+      }
     }
     // manual reset → back to the start line
     if (input.consumeReset()) {
@@ -224,7 +261,9 @@ export async function startGame(): Promise<void> {
   });
 
   // debug handle for tuning + headless stepping from the console
-  (window as unknown as { __raze: object }).__raze = { chase, rider, track, world, input, coordinator };
+  (window as unknown as { __raze: object }).__raze = {
+    chase, rider, track, world, input, coordinator, trackLogic, riderTrackInfo,
+  };
 
   // ---- camera metadata panel + clipboard copy ----
   const cammetaEl = document.getElementById('cammeta')!;
