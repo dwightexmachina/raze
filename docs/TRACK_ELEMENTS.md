@@ -115,3 +115,23 @@ New systems the starter track forces, deliberately:
 tubes (P2 — needs surface-relative gravity, but the spline is ready for
 them), forks (routing matters once times matter), moving hazards, trick
 bowls, items.
+
+---
+
+## Ride Modes (traversal architecture)
+
+Traversal is a state machine of **Ride Modes** (`src/modes/`). Each mode
+owns the full contract while active: physics stepping, what input means,
+camera behavior, and its own entry/exit cleanup. The coordinator owns
+transitions; resets/respawns always force HOVER.
+
+| Mode | What it is | Status |
+|---|---|---|
+| **HOVER** | Normal surface-relative hover physics | Live |
+| **GRIND** | Rail lock: snap on aligned approach, jump/run-out to exit | Live |
+| **TUBE** | Surface lock inside closed tubes: rider lives in (s, φ), no gravity, holds anywhere on the circumference (ceiling included); camera sits ON the tube axis watching the orbit; exit auto-unwinds φ to the floor so the rider leaves right-side-up | Live |
+| **FLIGHT** | Free 3D flight (StarFox-style pitch/yaw) | Stub — architecture proven, unimplemented |
+
+Constraint-driven modes (GRIND, TUBE) switch the body to kinematic and
+restore dynamics with an explicit velocity on exit, so momentum is
+continuous across every transition.

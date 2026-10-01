@@ -228,6 +228,18 @@ export class ChaseCamera {
     };
   }
 
+  /** After an external mode drove the camera, resume smoothing from its
+   *  current transform instead of snapping back to the stale rig state. */
+  resyncFromCamera(lookTarget: THREE.Vector3): void {
+    this.currentPos.copy(this.camera.position);
+    this.currentLook.copy(lookTarget);
+    const off = this.camera.position.clone().sub(lookTarget);
+    if (Math.hypot(off.x, off.z) > 0.5) {
+      this.baseAngle = Math.atan2(off.x, off.z);
+    }
+    this.effUp.copy(this.camera.up).normalize();
+  }
+
   resize(aspect: number): void {
     this.camera.aspect = aspect;
     this.camera.updateProjectionMatrix();

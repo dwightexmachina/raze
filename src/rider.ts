@@ -2,7 +2,6 @@ import * as THREE from 'three';
 import type RAPIER_API from '@dimforge/rapier3d-compat';
 import { makeGlowTexture } from './matcap';
 import type { Input } from './input';
-import type { RailLine } from './track/builder';
 
 type Rapier = typeof RAPIER_API;
 
@@ -29,8 +28,8 @@ const DRAG_K = 1.35;
 
 // Boost economy: SHIFT spends the meter, tricks and grinding fill it
 const BOOST_FORCE = 3000;        // N along the deck while boosting
-const BOOST_DRAIN = 30;          // meter/s while boosting
-const METER_GRIND = 9;           // meter/s while grinding
+export const BOOST_DRAIN = 30;   // meter/s while boosting
+export const METER_GRIND = 9;    // meter/s while grinding / tube-locked
 const GRAB_RATE = 18;            // meter/s of grab airtime (on clean landing)
 const SPIN_POINTS: Array<[number, number]> = [
   [900, 100], [720, 70], [540, 45], [360, 26], [180, 12],
@@ -42,15 +41,6 @@ const LATERAL_GRIP = 9.0;        // 1/s — how fast sideways velocity dies
 const UPRIGHT_K = 620;
 const JUMP_IMPULSE = 620;
 
-// Snap-grind tuning
-const GRIND_SNAP_LATERAL = 0.9;  // max sideways distance to the rail line
-const GRIND_SNAP_ABOVE = 1.6;    // may snap from this far above the rail
-const GRIND_SNAP_BELOW = 0.25;   // ... and barely below it
-const GRIND_MIN_SPEED = 3;       // m/s along the rail to engage/stay
-const GRIND_ALIGN = 0.8;         // |v·dir| / |v| — rejects >~36° approaches
-const GRIND_FRICTION = 1.2;      // m/s² bleed while grinding
-const GRIND_RIDE = 0.34;         // board center above the rail center
-const GRIND_COOLDOWN = 0.5;      // s before re-snap after leaving a rail
 const FIXED_DT = 1 / 60;
 
 const CORNERS: Array<[number, number]> = [
@@ -79,14 +69,6 @@ export class Rider {
   private RAPIER: Rapier;
   private leanGroup = new THREE.Group();
   private jumpHeld = false;
-
-  // grind state
-  private rails: RailLine[] = [];
-  private grindRail: RailLine | null = null;
-  private grindT = 0;
-  private grindDir = 1;
-  private grindSpeed = 0;
-  private grindCool = 0;
 
   // air/trick state
   private wasGrounded = true;
@@ -205,14 +187,6 @@ export class Rider {
     }
   }
 
-  setRails(rails: RailLine[]): void {
-    this.rails = rails;
-  }
-
-  get grinding(): boolean {
-    return this.grindRail !== null;
-  }
-
   /** One-shot trick result for the HUD toast. */
   consumeTrick(): TrickEvent | null {
     const t = this.pendingTrick;
@@ -220,10 +194,52 @@ export class Rider {
     return t;
   }
 
+  // ---------- primitives for Ride Modes ----------
+
+  /** Reset air/trick accumulation (modes that suspend tricks call this). */
+  clearAir(): void {
+    this.airTime = 0;
+    this.airSpin = 0;
+    this.grabTime = 0;
+    this.grabActive = false;
+  }
+
+  /** Bank the current air as a styled (rail) landing. */
+  bankRailLanding(): void {
+    this.settleAir(true);
+  }
+
+  meterCharge(amount: number): void {
+    this.meter = Math.min(100, this.meter + amount);
+  }
+
+  jumpImpulse(): void {
+    this.body.applyImpulse({ x: 0, y: JUMP_IMPULSE, z: 0 }, true);
+  }
+
+  /** Kinematic takeover for constraint-driven modes (grind, tube). */
+  toKinematic(): void {
+    this.body.setBodyType(this.RAPIER.RigidBodyType.KinematicPositionBased, true);
+  }
+
+  /** Hand control back to dynamics with an explicit velocity. */
+  toDynamic(velocity: THREE.Vector3): void {
+    this.body.setBodyType(this.RAPIER.RigidBodyType.Dynamic, true);
+    this.body.setLinvel({ x: velocity.x, y: velocity.y, z: velocity.z }, true);
+    this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+  }
+
+  /** Drive the kinematic body for one step; keeps HUD/status coherent. */
+  driveKinematic(pos: THREE.Vector3, q: THREE.Quaternion, hudSpeed: number): void {
+    this.body.setNextKinematicTranslation({ x: pos.x, y: pos.y, z: pos.z });
+    this.body.setNextKinematicRotation({ x: q.x, y: q.y, z: q.z, w: q.w });
+    this.grounded = true;
+    this.wasGrounded = true;
+    this.speed = hudSpeed;
+  }
+
   /** Teleport the rider (spawn/respawn) facing `yaw`, velocities zeroed. */
   setPose(pos: THREE.Vector3, yaw: number): void {
-    this.grindRail = null;
-    this.grindCool = 0;
     const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
     this.body.setTranslation({ x: pos.x, y: pos.y, z: pos.z }, true);
     this.body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
@@ -231,17 +247,11 @@ export class Rider {
     this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
   }
 
-  /** One fixed physics step's worth of control + hover forces. */
-  step(input: Input, padBoost = false): void {
+  /** One fixed step of normal hover physics (the HOVER ride mode). */
+  stepHover(input: Input, padBoost = false): void {
     const body = this.body;
     body.resetForces(true);
     body.resetTorques(true);
-    this.grindCool = Math.max(0, this.grindCool - FIXED_DT);
-
-    if (this.grindRail) {
-      this.stepGrind(input);
-      return;
-    }
 
     const rot = body.rotation();
     const q = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
@@ -391,8 +401,6 @@ export class Rider {
       this.settleAir(false, forward, v, av.y);
     }
     this.wasGrounded = this.grounded;
-
-    this.trySnapToRail(v);
   }
 
   /** Judge and bank an air on landing (or on snapping to a rail). */
@@ -448,79 +456,6 @@ export class Rider {
     this.airSpin = 0;
     this.grabTime = 0;
     this.grabActive = false;
-  }
-
-  /** Locked to a rail: ride the line, bleed a little speed, jump or run out. */
-  private stepGrind(input: Input): void {
-    const r = this.grindRail!;
-    const body = this.body;
-
-    if (input.jump && !this.jumpHeld) {
-      this.jumpHeld = input.jump;
-      this.exitGrind();
-      body.applyImpulse({ x: 0, y: JUMP_IMPULSE, z: 0 }, true);
-      return;
-    }
-    this.jumpHeld = input.jump;
-
-    this.grindSpeed = Math.max(0, this.grindSpeed - GRIND_FRICTION * FIXED_DT);
-    this.grindT += this.grindDir * this.grindSpeed * FIXED_DT;
-
-    // ran off the end (keep velocity) or stalled out
-    if (this.grindT < 0 || this.grindT > r.length || this.grindSpeed < GRIND_MIN_SPEED * 0.5) {
-      this.exitGrind();
-      return;
-    }
-
-    const pos = r.start.clone().addScaledVector(r.dir, this.grindT);
-    pos.y += GRIND_RIDE;
-    body.setTranslation({ x: pos.x, y: pos.y, z: pos.z }, true);
-    const vel = r.dir.clone().multiplyScalar(this.grindDir * this.grindSpeed);
-    body.setLinvel({ x: vel.x, y: vel.y, z: vel.z }, true);
-    body.setAngvel({ x: 0, y: 0, z: 0 }, true);
-    const yaw = Math.atan2(-r.dir.x * this.grindDir, -r.dir.z * this.grindDir);
-    const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
-    body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
-
-    this.grounded = true;
-    this.wasGrounded = true;
-    this.speed = this.grindSpeed;
-    this.meter = Math.min(100, this.meter + METER_GRIND * FIXED_DT);
-  }
-
-  private exitGrind(): void {
-    this.grindRail = null;
-    this.grindCool = GRIND_COOLDOWN;
-  }
-
-  /** Snap on when passing over a rail roughly along its axis. */
-  private trySnapToRail(v: THREE.Vector3): void {
-    if (this.grindCool > 0 || this.rails.length === 0) return;
-    if (v.y > 3) return; // rising fast — don't yank the rider down mid-jump
-    const p = this.body.translation();
-    const pv = new THREE.Vector3(p.x, p.y, p.z);
-    const planar = Math.hypot(v.x, v.z);
-    if (planar < GRIND_MIN_SPEED) return;
-
-    for (const r of this.rails) {
-      const along = pv.clone().sub(r.start).dot(r.dir);
-      if (along < 0.5 || along > r.length - 0.5) continue;
-      const closest = r.start.clone().addScaledVector(r.dir, along);
-      const lateral = Math.hypot(pv.x - closest.x, pv.z - closest.z);
-      const vert = pv.y - closest.y;
-      if (lateral > GRIND_SNAP_LATERAL) continue;
-      if (vert < -GRIND_SNAP_BELOW || vert > GRIND_SNAP_ABOVE) continue;
-      const alongVel = v.dot(r.dir);
-      if (Math.abs(alongVel) < GRIND_MIN_SPEED) continue;
-      if (Math.abs(alongVel) / Math.max(planar, 0.1) < GRIND_ALIGN) continue;
-
-      this.settleAir(true); // landing ON a rail is always a styled landing
-      this.grindRail = r;
-      this.grindDir = alongVel >= 0 ? 1 : -1;
-      this.grindSpeed = Math.abs(alongVel);
-      this.grindT = along;
-      return;
-    }
   }
 
   /** Sync visuals to physics, add carve lean. */

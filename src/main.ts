@@ -6,6 +6,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 import { Input } from './input';
+import { ModeCoordinator } from './modes/coordinator';
 import { makeChromeMatcap } from './matcap';
 import { makeSky } from './sky';
 import { makeGrid, updateGrid } from './grid';
@@ -42,7 +43,9 @@ async function boot(): Promise<void> {
   const matcap = makeChromeMatcap();
   const input = new Input();
   const rider = new Rider(scene, world, RAPIER, matcap);
-  rider.setRails(rails);
+
+  // ---- ride modes: HOVER / GRIND / TUBE (+ FLIGHT stub) ----
+  const coordinator = new ModeCoordinator({ rider, track, rails, input, chase });
 
   // ---- track progress, respawn, timing ----
   const SPAWN_S = 4;
@@ -61,11 +64,12 @@ async function boot(): Promise<void> {
     aboveDeck: 0,     // height above the deck surface along its normal
     distToTrack: 0,   // distance to nearest centerline sample
     offTrack: false,
-    grinding: false,
+    rideMode: 'HOVER',
     checkpointS: 0,
   };
 
   function spawnAt(s: number): void {
+    coordinator.forceHover(); // resets always restore normal physics
     const f = track.frameAt(s);
     const yaw = Math.atan2(-f.tangent.x, -f.tangent.z);
     rider.setPose(f.pos.clone().addScaledVector(f.up, 1.8), yaw);
@@ -113,7 +117,7 @@ async function boot(): Promise<void> {
       riderTrackInfo.offTrack = true;
       riderTrackInfo.distToTrack = Math.round(near.dist * 10) / 10;
     }
-    riderTrackInfo.grinding = rider.grinding;
+    riderTrackInfo.rideMode = coordinator.modeName;
     riderTrackInfo.checkpointS = Math.round(checkpointS * 10) / 10;
     // fell into the void → back to the last checkpoint
     if (pos.y < track.spec.baseY - 10) {
@@ -151,6 +155,7 @@ async function boot(): Promise<void> {
   canvas.style.cursor = 'grab';
   let dragging = false;
   canvas.addEventListener('pointerdown', (e) => {
+    if (coordinator.cameraOverridden) return; // mode owns the camera
     dragging = true;
     canvas.setPointerCapture(e.pointerId);
     canvas.style.cursor = 'grabbing';
@@ -167,6 +172,7 @@ async function boot(): Promise<void> {
   canvas.addEventListener('pointercancel', endDrag);
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
+    if (coordinator.cameraOverridden) return;
     chase.zoomBy(e.deltaY);
   }, { passive: false });
   // ---- pause (physics + timer freeze; rendering and camera stay live) ----
@@ -185,12 +191,12 @@ async function boot(): Promise<void> {
 
   window.addEventListener('keydown', (e) => {
     if (e.code === 'KeyC') chase.resetOffsets();
-    if (e.code === 'KeyV') chase.cycleMode();
+    if (e.code === 'KeyV' && !coordinator.cameraOverridden) chase.cycleMode();
     if (e.code === 'KeyP') togglePause();
   });
 
   // debug handle for tuning + headless stepping from the console
-  (window as unknown as { __raze: object }).__raze = { chase, rider, track, world, input };
+  (window as unknown as { __raze: object }).__raze = { chase, rider, track, world, input, coordinator };
 
   // ---- camera metadata panel + clipboard copy ----
   const cammetaEl = document.getElementById('cammeta')!;
@@ -228,7 +234,7 @@ async function boot(): Promise<void> {
       `cam     <b>${v3(m.cameraPos)}</b>\n` +
       `look    <b>${v3(m.lookTarget)}</b>\n` +
       `rider   <b>${v3(m.riderPos)}</b>\n` +
-      `seg     <b>${riderTrackInfo.offTrack ? 'OFF TRACK' : riderTrackInfo.segment.split(' [')[0]}${riderTrackInfo.grinding ? ' · GRIND' : ''}</b>\n` +
+      `seg     <b>${riderTrackInfo.offTrack ? 'OFF TRACK' : riderTrackInfo.segment.split(' [')[0]}${riderTrackInfo.rideMode !== 'HOVER' ? ' · ' + riderTrackInfo.rideMode : ''}</b>\n` +
       `s / lat <b>${riderTrackInfo.s.toFixed(1)} / ${riderTrackInfo.lateral > 0 ? '+' : ''}${riderTrackInfo.lateral.toFixed(1)}</b>\n` +
       `deck    <b>${riderTrackInfo.aboveDeck > 0 ? '+' : ''}${riderTrackInfo.aboveDeck.toFixed(1)}</b>`;
   }
@@ -259,7 +265,7 @@ async function boot(): Promise<void> {
       accumulator += dt;
       trackLogic();
       while (accumulator >= FIXED_DT) {
-        rider.step(input, onBoostPad);
+        coordinator.fixedStep(onBoostPad);
         world.timestep = FIXED_DT;
         world.step();
         accumulator -= FIXED_DT;
@@ -269,10 +275,12 @@ async function boot(): Promise<void> {
     }
 
     rider.syncVisual(input);
-    chase.update(
-      dt, rider.position, rider.heading, rider.speed,
-      rider.boardUp, rider.travelHeading, !rider.grounded, camRadiusClamp,
-    );
+    if (!coordinator.frameCamera(dt)) {
+      chase.update(
+        dt, rider.position, rider.heading, rider.speed,
+        rider.boardUp, rider.travelHeading, !rider.grounded, camRadiusClamp,
+      );
+    }
     updateGrid(grid, chase.camera.position);
     updateTrack(trackMesh, chase.camera.position);
     updateMetaPanel(dt);
