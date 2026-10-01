@@ -38,6 +38,7 @@ export class TubeMode implements RideMode {
   private phiSpeed = 0;
   private camBlend = 0;
   private camStart = new THREE.Vector3();
+  private camStartQ = new THREE.Quaternion();
 
   private static frame0(tangent: THREE.Vector3): { r0: THREE.Vector3; u0: THREE.Vector3 } {
     const r0 = new THREE.Vector3().crossVectors(tangent, Y).normalize();
@@ -66,6 +67,7 @@ export class TubeMode implements RideMode {
     this.engaged = true;
     this.camBlend = 0;
     this.camStart.copy(ctx.chase.camera.position);
+    this.camStartQ.copy(ctx.chase.camera.quaternion);
     ctx.rider.clearAir();
     ctx.rider.toKinematic();
   }
@@ -131,19 +133,33 @@ export class TubeMode implements RideMode {
     return null;
   }
 
+  /**
+   * Fixed-axis turret: position = axis point at the rider's axial distance
+   * (trailing CAM_BACK), orientation = dead along the tangent with roll
+   * locked to the unrolled frame. No lookAt — the rider's φ changes where
+   * he appears on the screen circle, never where the camera points, so
+   * every cross-section renders as a perfect centered circle.
+   */
   updateCamera(ctx: ModeContext, dt: number): void {
     const cam = ctx.chase.camera;
+    const sign = this.sSpeed >= 0 ? 1 : -1;
     const backS = THREE.MathUtils.clamp(
-      this.s - CAM_BACK * (this.sSpeed >= 0 ? 1 : -1), 1,
+      this.s - CAM_BACK * sign, 1,
       ctx.track.samples[ctx.track.samples.length - 1].s - 1,
     );
     const f = ctx.track.frameAt(backS);
     const { u0 } = TubeMode.frame0(f.tangent);
-    const desired = f.pos.clone().addScaledVector(u0, f.tubeR); // ON the axis
+    const axisPos = f.pos.clone().addScaledVector(u0, f.tubeR); // ON the axis
+
+    const fwd = f.tangent.clone().multiplyScalar(sign);
+    const qT = new THREE.Quaternion().setFromRotationMatrix(
+      new THREE.Matrix4().lookAt(new THREE.Vector3(), fwd, u0),
+    );
+
     this.camBlend = Math.min(1, this.camBlend + dt * 2.5);
-    cam.position.copy(this.camStart.clone().lerp(desired, this.camBlend));
-    cam.up.set(0, 1, 0);
-    cam.lookAt(ctx.rider.position);
+    cam.position.copy(this.camStart.clone().lerp(axisPos, this.camBlend));
+    cam.quaternion.copy(this.camStartQ).slerp(qT, this.camBlend);
+    cam.up.copy(u0);
     cam.fov += (74 - cam.fov) * (1 - Math.exp(-dt * 4));
     cam.updateProjectionMatrix();
   }
