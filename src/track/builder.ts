@@ -180,9 +180,17 @@ export class Track {
 
 /* ============================ builder ============================ */
 
+export interface RailLine {
+  start: THREE.Vector3;
+  end: THREE.Vector3;
+  dir: THREE.Vector3;
+  length: number;
+}
+
 export interface BuiltTrack {
   track: Track;
   mesh: THREE.Mesh;
+  rails: RailLine[];
 }
 
 export function buildTrack(
@@ -285,9 +293,10 @@ export function buildTrack(
   addGateBar(scene, track, spec.finish, new THREE.Color(2.0, 0.4, 1.1));
 
   // ---- attachments ----
-  for (const att of spec.attachments) buildAttachment(scene, world, RAPIER, track, att);
+  const rails: RailLine[] = [];
+  for (const att of spec.attachments) buildAttachment(scene, world, RAPIER, track, att, rails);
 
-  return { track, mesh };
+  return { track, mesh, rails };
 }
 
 export function updateTrack(mesh: THREE.Mesh, camPos: THREE.Vector3): void {
@@ -325,6 +334,7 @@ function buildAttachment(
   RAPIER: Rapier,
   track: Track,
   att: Attachment,
+  rails: RailLine[],
 ): void {
   const yawQuat = (yaw: number): THREE.Quaternion =>
     new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
@@ -384,6 +394,17 @@ function buildAttachment(
     const from = track.frameAt(att.at);
     const to = track.frameAt(att.at + att.length);
     const h = att.height ?? 0.8;
+    const railStart = from.pos.clone().addScaledVector(from.right, att.offset);
+    railStart.y += h;
+    const railEnd = to.pos.clone().addScaledVector(from.right, att.offset);
+    railEnd.y += h;
+    const railDir = railEnd.clone().sub(railStart);
+    rails.push({
+      start: railStart,
+      end: railEnd,
+      dir: railDir.clone().normalize(),
+      length: railDir.length(),
+    });
     const mid = from.pos.clone().add(to.pos).multiplyScalar(0.5)
       .addScaledVector(from.right, att.offset);
     mid.y += h;

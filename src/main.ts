@@ -37,11 +37,12 @@ async function boot(): Promise<void> {
   const spec = new URLSearchParams(location.search).get('map') === 'gauntlet'
     ? GAUNTLET_PLUS
     : PIPELINE;
-  const { track, mesh: trackMesh } = buildTrack(scene, world, RAPIER, spec);
+  const { track, mesh: trackMesh, rails } = buildTrack(scene, world, RAPIER, spec);
 
   const matcap = makeChromeMatcap();
   const input = new Input();
   const rider = new Rider(scene, world, RAPIER, matcap);
+  rider.setRails(rails);
 
   // ---- track progress, respawn, timing ----
   const SPAWN_S = 4;
@@ -59,6 +60,7 @@ async function boot(): Promise<void> {
     aboveDeck: 0,     // height above the deck surface along its normal
     distToTrack: 0,   // distance to nearest centerline sample
     offTrack: false,
+    grinding: false,
     checkpointS: 0,
   };
 
@@ -109,6 +111,7 @@ async function boot(): Promise<void> {
       riderTrackInfo.offTrack = true;
       riderTrackInfo.distToTrack = Math.round(near.dist * 10) / 10;
     }
+    riderTrackInfo.grinding = rider.grinding;
     riderTrackInfo.checkpointS = Math.round(checkpointS * 10) / 10;
     // fell into the void → back to the last checkpoint
     if (pos.y < track.spec.baseY - 10) {
@@ -223,7 +226,7 @@ async function boot(): Promise<void> {
       `cam     <b>${v3(m.cameraPos)}</b>\n` +
       `look    <b>${v3(m.lookTarget)}</b>\n` +
       `rider   <b>${v3(m.riderPos)}</b>\n` +
-      `seg     <b>${riderTrackInfo.offTrack ? 'OFF TRACK' : riderTrackInfo.segment.split(' [')[0]}</b>\n` +
+      `seg     <b>${riderTrackInfo.offTrack ? 'OFF TRACK' : riderTrackInfo.segment.split(' [')[0]}${riderTrackInfo.grinding ? ' · GRIND' : ''}</b>\n` +
       `s / lat <b>${riderTrackInfo.s.toFixed(1)} / ${riderTrackInfo.lateral > 0 ? '+' : ''}${riderTrackInfo.lateral.toFixed(1)}</b>\n` +
       `deck    <b>${riderTrackInfo.aboveDeck > 0 ? '+' : ''}${riderTrackInfo.aboveDeck.toFixed(1)}</b>`;
   }
