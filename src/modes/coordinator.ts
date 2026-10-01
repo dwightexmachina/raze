@@ -35,6 +35,12 @@ export class ModeCoordinator {
   fixedStep(padBoost: boolean): void {
     this.grind.tickCooldown(FIXED_DT);
 
+    // keep the nearest-sample hint current in EVERY mode — a hint frozen
+    // during a long tube run goes stale and causes spurious re-entries
+    // while it crawls back to the rider after exit
+    const near = this.ctx.track.nearest(this.ctx.rider.position, this.nearHint);
+    this.nearHint = near.idx;
+
     const req = this.active.step(this.ctx, padBoost);
     if (req) {
       this.switchTo(req);
@@ -43,10 +49,10 @@ export class ModeCoordinator {
 
     if (this.active === this.hover) {
       // tube sensor: fully-closed tube at the rider's track position
-      const near = this.ctx.track.nearest(this.ctx.rider.position, this.nearHint);
-      this.nearHint = near.idx;
       const smp = this.ctx.track.samples[near.idx];
-      if (smp.tubeAmt > 0.95 && near.dist < smp.tubeR * 2.2) {
+      // enter only in fully-formed tube (hysteresis vs the mode's exit
+      // threshold at 0.97, so the boundary can't flap)
+      if (smp.tubeAmt > 0.995 && near.dist < smp.tubeR * 2.2) {
         this.tube.pendingIdx = near.idx;
         this.switchTo('tube');
         return;

@@ -11,7 +11,7 @@ import { makeChromeMatcap } from './matcap';
 import { makeSky } from './sky';
 import { makeGrid, updateGrid } from './grid';
 import { buildTrack, updateTrack } from './track/builder';
-import { GAUNTLET_PLUS, PIPELINE } from './track/spec';
+import { GAUNTLET_PLUS, LOOPER, PIPELINE } from './track/spec';
 import { Rider } from './rider';
 import { ChaseCamera } from './camera';
 
@@ -34,10 +34,12 @@ async function boot(): Promise<void> {
   scene.add(makeSky());
   const grid = makeGrid();
   scene.add(grid);
-  // map select: ?map=gauntlet for the original; PIPELINE is the default
-  const spec = new URLSearchParams(location.search).get('map') === 'gauntlet'
-    ? GAUNTLET_PLUS
-    : PIPELINE;
+  // map select: ?map=gauntlet | ?map=looper; PIPELINE is the default
+  const mapParam = new URLSearchParams(location.search).get('map');
+  const spec =
+    mapParam === 'gauntlet' ? GAUNTLET_PLUS :
+    mapParam === 'looper' ? LOOPER :
+    PIPELINE;
   const { track, mesh: trackMesh, rails } = buildTrack(scene, world, RAPIER, spec);
 
   const matcap = makeChromeMatcap();

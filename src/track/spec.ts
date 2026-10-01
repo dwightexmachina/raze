@@ -124,3 +124,30 @@ export const PIPELINE: TrackSpec = {
     { kind: 'pylon', at: 799, offset: 3.5 },
   ],
 };
+
+/** Loop gym: nothing but straights and full tubes. If something breaks
+ *  here, it's the tube system and only the tube system. */
+export const LOOPER: TrackSpec = {
+  name: 'LOOPER',
+  width: 16,
+  baseY: 8,
+  start: 12,
+  finish: 410,
+  // Design rule: twist only on segments whose tube is already fully formed
+  // (give every twisted tube an untwisted mouth segment) — twisting the
+  // open-mouth morph corkscrews the half-formed shell.
+  segments: [
+    { kind: 'straight', length: 50, label: 'start straight' },                     //   0- 50
+    { kind: 'straight', length: 50, tube: 7, label: 'tube A' },                    //  50-100
+    { kind: 'straight', length: 45, label: 'link 1' },                             // 100-145
+    { kind: 'straight', length: 20, tube: 7, label: 'tube B mouth' },              // 145-165
+    { kind: 'straight', length: 60, tube: 7, twist: 360, label: 'tube B (corkscrew)' },        // 165-225
+    { kind: 'straight', length: 45, label: 'link 2' },                             // 225-270
+    { kind: 'straight', length: 20, tube: 7, label: 'tube C mouth' },              // 270-290
+    { kind: 'straight', length: 80, tube: 7, twist: 720, label: 'tube C (double corkscrew)' }, // 290-370
+    { kind: 'straight', length: 60, label: 'finish straight' },                    // 370-430
+  ],
+  attachments: [
+    { kind: 'boost', at: 26, length: 10 },
+  ],
+};
