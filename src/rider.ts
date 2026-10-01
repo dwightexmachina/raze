@@ -56,6 +56,25 @@ export interface TrickEvent {
   quality: 'CLEAN' | 'SKETCHY' | 'BAIL';
 }
 
+// Scratch pool — stepHover runs 60×/s; reusing these makes the hot path
+// allocation-free so the GC never gets fed (GC pauses = mid-carve hitches).
+const _q = new THREE.Quaternion();
+const _up = new THREE.Vector3();
+const _fwd = new THREE.Vector3();
+const _right = new THREE.Vector3();
+const _angvel = new THREE.Vector3();
+const _v = new THREE.Vector3();
+const _local = new THREE.Vector3();
+const _n = new THREE.Vector3();
+const _nSum = new THREE.Vector3();
+const _cv = new THREE.Vector3();
+const _corr = new THREE.Vector3();
+const _sUp = new THREE.Vector3();
+const _Y = new THREE.Vector3(0, 1, 0); // read-only
+const _o1 = { x: 0, y: 0, z: 0 };
+const _o2 = { x: 0, y: 0, z: 0 };
+const _rotObj = { x: 0, y: 0, z: 0, w: 1 };
+
 export class Rider {
   readonly group = new THREE.Group();
   readonly body: RAPIER_API.RigidBody;
@@ -69,6 +88,7 @@ export class Rider {
   private RAPIER: Rapier;
   private leanGroup = new THREE.Group();
   private jumpHeld = false;
+  private ray: RAPIER_API.Ray;
 
   // air/trick state
   private wasGrounded = true;
@@ -86,6 +106,7 @@ export class Rider {
   ) {
     this.world = world;
     this.RAPIER = RAPIER;
+    this.ray = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
 
     const chrome = new THREE.MeshMatcapMaterial({ matcap });
 
@@ -231,8 +252,10 @@ export class Rider {
 
   /** Drive the kinematic body for one step; keeps HUD/status coherent. */
   driveKinematic(pos: THREE.Vector3, q: THREE.Quaternion, hudSpeed: number): void {
-    this.body.setNextKinematicTranslation({ x: pos.x, y: pos.y, z: pos.z });
-    this.body.setNextKinematicRotation({ x: q.x, y: q.y, z: q.z, w: q.w });
+    _o1.x = pos.x; _o1.y = pos.y; _o1.z = pos.z;
+    this.body.setNextKinematicTranslation(_o1);
+    _rotObj.x = q.x; _rotObj.y = q.y; _rotObj.z = q.z; _rotObj.w = q.w;
+    this.body.setNextKinematicRotation(_rotObj);
     this.grounded = true;
     this.wasGrounded = true;
     this.speed = hudSpeed;
@@ -254,68 +277,66 @@ export class Rider {
     body.resetTorques(true);
 
     const rot = body.rotation();
-    const q = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
+    _q.set(rot.x, rot.y, rot.z, rot.w);
     const pos = body.translation();
     const vel = body.linvel();
-    const v = new THREE.Vector3(vel.x, vel.y, vel.z);
+    _v.set(vel.x, vel.y, vel.z);
     const mass = body.mass();
 
     // Board frame — the whole model is SURFACE-RELATIVE, not world-vertical:
     // rays cast along board-down, springs push along board-up, damping only
     // fights along-normal velocity (so climbing a slope isn't punished),
-    // and thrust acts along the deck plane.
-    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
-    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(q).normalize();
-    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+    // and thrust acts along the deck plane. All scratch — no allocations.
+    _up.set(0, 1, 0).applyQuaternion(_q);
+    _fwd.set(0, 0, -1).applyQuaternion(_q).normalize();
+    _right.set(1, 0, 0).applyQuaternion(_q);
     const av = body.angvel();
-    const angvel = new THREE.Vector3(av.x, av.y, av.z);
+    _angvel.set(av.x, av.y, av.z);
 
     // ---- hover springs at four corners, along the board normal ----
     this.grounded = false;
-    const rayDir = { x: -up.x, y: -up.y, z: -up.z };
-    const normalSum = new THREE.Vector3();
+    this.ray.dir.x = -_up.x;
+    this.ray.dir.y = -_up.y;
+    this.ray.dir.z = -_up.z;
+    _nSum.set(0, 0, 0);
     let hits = 0;
     for (const [dz, dx] of CORNERS) {
-      const local = new THREE.Vector3(dx, 0, dz).applyQuaternion(q);
-      const origin = {
-        x: pos.x + local.x + up.x * RAY_LIFT,
-        y: pos.y + local.y + up.y * RAY_LIFT,
-        z: pos.z + local.z + up.z * RAY_LIFT,
-      };
-      const ray = new this.RAPIER.Ray(origin, rayDir);
+      _local.set(dx, 0, dz).applyQuaternion(_q);
+      this.ray.origin.x = pos.x + _local.x + _up.x * RAY_LIFT;
+      this.ray.origin.y = pos.y + _local.y + _up.y * RAY_LIFT;
+      this.ray.origin.z = pos.z + _local.z + _up.z * RAY_LIFT;
       const hit = this.world.castRayAndGetNormal(
-        ray, HOVER_RAY_LENGTH + RAY_LIFT, true, undefined, undefined, undefined, body,
+        this.ray, HOVER_RAY_LENGTH + RAY_LIFT, true, undefined, undefined, undefined, body,
       );
       if (hit) {
         const dist = hit.timeOfImpact - RAY_LIFT; // distance from the board itself
         if (dist < HOVER_RAY_LENGTH) {
           this.grounded = this.grounded || dist < HOVER_REST * 1.4;
-          const n = new THREE.Vector3(hit.normal.x, hit.normal.y, hit.normal.z);
-          if (n.dot(up) < 0) n.negate(); // trimesh backface
-          normalSum.add(n);
+          _n.set(hit.normal.x, hit.normal.y, hit.normal.z);
+          if (_n.dot(_up) < 0) _n.negate(); // trimesh backface
+          _nSum.add(_n);
           hits++;
           const compression = HOVER_REST - dist;
-          const cornerVel = v.clone().add(angvel.clone().cross(local));
+          _cv.copy(_angvel).cross(_local).add(_v);
           const ratio = Math.max(0, compression / HOVER_REST);
           const springForce =
             SPRING_K * compression * (1 + SPRING_PROG * ratio * ratio) -
-            SPRING_DAMP * cornerVel.dot(up);
+            SPRING_DAMP * _cv.dot(_up);
           if (springForce > 0) {
-            body.addForceAtPoint(
-              { x: up.x * springForce, y: up.y * springForce, z: up.z * springForce },
-              { x: pos.x + local.x, y: pos.y + local.y, z: pos.z + local.z },
-              true,
-            );
+            _o1.x = _up.x * springForce; _o1.y = _up.y * springForce; _o1.z = _up.z * springForce;
+            _o2.x = pos.x + _local.x; _o2.y = pos.y + _local.y; _o2.z = pos.z + _local.z;
+            body.addForceAtPoint(_o1, _o2, true);
           }
         }
       }
     }
-    const surfaceUp = hits > 0 ? normalSum.normalize() : new THREE.Vector3(0, 1, 0);
+    if (hits > 0) _sUp.copy(_nSum).normalize(); else _sUp.copy(_Y);
 
     // ---- thrust along the deck plane (climbs hills instead of plowing) ----
     if (input.thrust !== 0 && this.grounded) {
-      const f = forward.clone().multiplyScalar(THRUST * input.thrust);
-      body.addForce({ x: f.x, y: f.y, z: f.z }, true);
+      const m = THRUST * input.thrust;
+      _o1.x = _fwd.x * m; _o1.y = _fwd.y * m; _o1.z = _fwd.z * m;
+      body.addForce(_o1, true);
     }
 
     // ---- boost: spends the meter, earned back by tricks and grinding ----
@@ -323,26 +344,25 @@ export class Rider {
     if (this.boosting) {
       this.meter = Math.max(0, this.meter - BOOST_DRAIN * FIXED_DT);
       if (this.grounded) {
-        const f = forward.clone().multiplyScalar(BOOST_FORCE);
-        body.addForce({ x: f.x, y: f.y, z: f.z }, true);
+        _o1.x = _fwd.x * BOOST_FORCE; _o1.y = _fwd.y * BOOST_FORCE; _o1.z = _fwd.z * BOOST_FORCE;
+        body.addForce(_o1, true);
       }
     }
 
     // ---- boost pad: free speed regardless of input ----
     if (padBoost && this.grounded) {
-      const f = forward.clone().multiplyScalar(THRUST * 1.4);
-      body.addForce({ x: f.x, y: f.y, z: f.z }, true);
+      const m = THRUST * 1.4;
+      _o1.x = _fwd.x * m; _o1.y = _fwd.y * m; _o1.z = _fwd.z * m;
+      body.addForce(_o1, true);
     }
 
     // ---- aero drag (planar only; mostly off in the air so jumps carry) ----
-    const planarSpeed = Math.hypot(v.x, v.z);
+    const planarSpeed = Math.hypot(_v.x, _v.z);
     this.speed = planarSpeed;
     if (planarSpeed > 0.5) {
       const k = DRAG_K * (this.grounded ? 1 : 0.2);
-      body.addForce(
-        { x: -v.x * k * planarSpeed, y: 0, z: -v.z * k * planarSpeed },
-        true,
-      );
+      _o1.x = -_v.x * k * planarSpeed; _o1.y = 0; _o1.z = -_v.z * k * planarSpeed;
+      body.addForce(_o1, true);
     }
 
     // ---- carve steering: torque + speed-scaled effectiveness ----
@@ -350,41 +370,37 @@ export class Rider {
       if (input.steer !== 0) {
         // carve: yaw torque around the BOARD's up axis (works on walls/pipes)
         const tq = YAW_TORQUE * input.steer;
-        body.addTorque({ x: up.x * tq, y: up.y * tq, z: up.z * tq }, true);
+        _o1.x = _up.x * tq; _o1.y = _up.y * tq; _o1.z = _up.z * tq;
+        body.addTorque(_o1, true);
       }
     } else {
       // air spin is rate-controlled, arcade-style: steer drives yaw rate
       // toward ±AIR_SPIN_RATE, release snaps it back to zero — precise
       // 360s instead of fighting the plank's inertia
       const targetW = input.steer * AIR_SPIN_RATE;
-      const wUp = angvel.dot(up);
-      const newWUp = wUp + (targetW - wUp) * AIR_SPIN_SNAP;
-      const w = angvel.clone().addScaledVector(up, newWUp - wUp);
-      body.setAngvel({ x: w.x, y: w.y, z: w.z }, true);
+      const wUp = _angvel.dot(_up);
+      const dW = (targetW - wUp) * AIR_SPIN_SNAP;
+      _o1.x = av.x + _up.x * dW; _o1.y = av.y + _up.y * dW; _o1.z = av.z + _up.z * dW;
+      body.setAngvel(_o1, true);
     }
 
     // ---- lateral grip: carve, don't slide ----
     if (this.grounded) {
-      const latVel = right.dot(v);
-      const gripForce = right.clone().multiplyScalar(-latVel * LATERAL_GRIP * mass);
-      body.addForce({ x: gripForce.x, y: gripForce.y, z: gripForce.z }, true);
+      const g = -_right.dot(_v) * LATERAL_GRIP * mass;
+      _o1.x = _right.x * g; _o1.y = _right.y * g; _o1.z = _right.z * g;
+      body.addForce(_o1, true);
     }
 
     // ---- upright stabilization: align to the surface under the board
     // (banks and slopes), or to world-up when airborne ----
-    const uprightTarget = this.grounded ? surfaceUp : new THREE.Vector3(0, 1, 0);
-    const correction = new THREE.Vector3().crossVectors(up, uprightTarget);
-    body.addTorque(
-      { x: correction.x * UPRIGHT_K, y: correction.y * UPRIGHT_K, z: correction.z * UPRIGHT_K },
-      true,
-    );
+    _corr.crossVectors(_up, this.grounded ? _sUp : _Y);
+    _o1.x = _corr.x * UPRIGHT_K; _o1.y = _corr.y * UPRIGHT_K; _o1.z = _corr.z * UPRIGHT_K;
+    body.addTorque(_o1, true);
 
     // ---- jump (edge-triggered), along the board normal ----
     if (input.jump && !this.jumpHeld && this.grounded) {
-      body.applyImpulse(
-        { x: up.x * JUMP_IMPULSE, y: up.y * JUMP_IMPULSE, z: up.z * JUMP_IMPULSE },
-        true,
-      );
+      _o1.x = _up.x * JUMP_IMPULSE; _o1.y = _up.y * JUMP_IMPULSE; _o1.z = _up.z * JUMP_IMPULSE;
+      body.applyImpulse(_o1, true);
     }
     this.jumpHeld = input.jump;
 
@@ -398,7 +414,7 @@ export class Rider {
         this.grabActive = true;
       }
     } else if (!this.wasGrounded) {
-      this.settleAir(false, forward, v, av.y);
+      this.settleAir(false, _fwd, _v, av.y); // settleAir reads these synchronously
     }
     this.wasGrounded = this.grounded;
   }

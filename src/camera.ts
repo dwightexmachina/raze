@@ -34,6 +34,16 @@ export const PRESETS: CameraPreset[] = [
 // TODO(idle orbit): after ~5 s without input, slow cinematic orbit
 // around the rider (attract/podium mode).
 
+// scratch pool — update() runs every render frame; no per-frame allocations
+const _Y = new THREE.Vector3(0, 1, 0); // read-only
+const _tUp = new THREE.Vector3();
+const _frameQ = new THREE.Quaternion();
+const _gaze = new THREE.Vector3();
+const _desired = new THREE.Vector3();
+const _look = new THREE.Vector3();
+const _off = new THREE.Vector3();
+const _sh = new THREE.Vector3();
+
 export interface CameraMeta {
   preset: string;
   manual: boolean;
@@ -124,8 +134,8 @@ export class ChaseCamera {
     radiusClamp = 0, // >0: cap orbit radius (e.g. inside a tube)
   ): void {
     const p = this.preset;
-    let desired: THREE.Vector3;
-    let look: THREE.Vector3;
+    const desired = _desired;
+    const look = _look;
     // orbit modes anchor to travel direction (tricks read, switch riding
     // doesn't flip the camera); BOARD cam stays facing-anchored
     const heading = (!p.fpv && travel) ? travel : facing;
@@ -133,25 +143,20 @@ export class ChaseCamera {
 
     // roll the whole rig with the riding surface (mostly — keep a bias
     // toward world-up so mild banks don't feel like the world is tilting)
-    const targetUp = surfaceUp
-      ? surfaceUp.clone().lerp(new THREE.Vector3(0, 1, 0), 0.3).normalize()
-      : new THREE.Vector3(0, 1, 0);
-    this.effUp.lerp(targetUp, 1 - Math.exp(-dt * 3.5)).normalize();
-    const frameQ = new THREE.Quaternion().setFromUnitVectors(
-      new THREE.Vector3(0, 1, 0), this.effUp,
-    );
+    if (surfaceUp) _tUp.copy(surfaceUp).lerp(_Y, 0.3).normalize();
+    else _tUp.copy(_Y);
+    this.effUp.lerp(_tUp, 1 - Math.exp(-dt * 3.5)).normalize();
+    _frameQ.setFromUnitVectors(_Y, this.effUp);
 
     if (p.fpv) {
       // board cam: perched above the nose, looking down the line of travel;
       // drag offsets rotate the gaze instead of orbiting
-      const gaze = heading.clone()
-        .applyAxisAngle(new THREE.Vector3(0, 1, 0), this.azimuthOffset);
-      gaze.y += this.polarOffset * 0.8;
-      gaze.normalize();
-      desired = target.clone()
-        .add(new THREE.Vector3(0, 1.5, 0))
-        .addScaledVector(heading, 1.0);
-      look = desired.clone().addScaledVector(gaze, p.lookAhead);
+      _gaze.copy(heading).applyAxisAngle(_Y, this.azimuthOffset);
+      _gaze.y += this.polarOffset * 0.8;
+      _gaze.normalize();
+      desired.copy(target).addScaledVector(heading, 1.0);
+      desired.y += 1.5;
+      look.copy(desired).addScaledVector(_gaze, p.lookAhead);
       this.effAzimuth = this.azimuthOffset;
       this.effPolar = 0;
       this.effRadius = 0;
@@ -180,20 +185,18 @@ export class ChaseCamera {
       this.baseAngle += delta * (1 - Math.exp(-dt * 6));
       const a = this.baseAngle + azimuth;
       const sinP = Math.sin(polar);
-      const offset = new THREE.Vector3(
+      _off.set(
         Math.sin(a) * sinP * radius,
         Math.cos(polar) * radius,
         Math.cos(a) * sinP * radius,
-      ).applyQuaternion(frameQ); // orbit in the rolled frame
-      desired = target.clone().add(offset);
+      ).applyQuaternion(_frameQ); // orbit in the rolled frame
+      desired.copy(target).add(_off);
 
       // look ahead along the SMOOTHED heading so look and orbit agree
-      const smoothHeading = new THREE.Vector3(
-        -Math.sin(this.baseAngle), 0, -Math.cos(this.baseAngle),
-      );
+      _sh.set(-Math.sin(this.baseAngle), 0, -Math.cos(this.baseAngle));
       const aheadAmount = Math.max(Math.cos(azimuth), 0) * p.lookAhead;
-      look = target.clone()
-        .addScaledVector(smoothHeading, aheadAmount)
+      look.copy(target)
+        .addScaledVector(_sh, aheadAmount)
         .addScaledVector(this.effUp, 1.2);
     }
 

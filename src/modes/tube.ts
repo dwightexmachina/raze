@@ -15,6 +15,21 @@ const CAM_BACK = 8;         // camera sits on the axis this far behind the rider
 
 const Y = new THREE.Vector3(0, 1, 0);
 
+// scratch pool — step runs 60×/s, updateCamera every render frame
+const _r0 = new THREE.Vector3();
+const _u0 = new THREE.Vector3();
+const _center = new THREE.Vector3();
+const _radial = new THREE.Vector3();
+const _pos = new THREE.Vector3();
+const _upB = new THREE.Vector3();
+const _fwd = new THREE.Vector3();
+const _back = new THREE.Vector3();
+const _x = new THREE.Vector3();
+const _upT = new THREE.Vector3();
+const _m = new THREE.Matrix4();
+const _qd = new THREE.Quaternion();
+const _zero = new THREE.Vector3();
+
 /**
  * TUBE (surface-lock): inside a closed tube, gravity is replaced by a
  * surface lock. The rider lives in (s, φ) — arclength along the axis and
@@ -54,28 +69,28 @@ export class TubeMode implements RideMode {
   private camStartQ = new THREE.Quaternion();
   private camUp = new THREE.Vector3(0, 1, 0); // smoothed roll-up vector
 
-  private static frame0(tangent: THREE.Vector3): { r0: THREE.Vector3; u0: THREE.Vector3 } {
-    const r0 = new THREE.Vector3().crossVectors(tangent, Y).normalize();
-    const u0 = new THREE.Vector3().crossVectors(r0, tangent).normalize();
-    return { r0, u0 };
+  /** Unrolled frame → writes into the module scratch _r0/_u0. */
+  private static frame0(tangent: THREE.Vector3): void {
+    _r0.crossVectors(tangent, Y).normalize();
+    _u0.crossVectors(_r0, tangent).normalize();
   }
 
   enter(ctx: ModeContext): void {
     const smp = ctx.track.samples[this.pendingIdx];
-    const { r0, u0 } = TubeMode.frame0(smp.tangent);
+    TubeMode.frame0(smp.tangent);
     const R = smp.tubeR;
-    const center = smp.pos.clone().addScaledVector(u0, R);
-    const rel = ctx.rider.position.sub(center);
-    this.phi = Math.atan2(rel.dot(r0), -rel.dot(u0));
+    _center.copy(smp.pos).addScaledVector(_u0, R);
+    const rel = ctx.rider.position.sub(_center);
+    this.phi = Math.atan2(rel.dot(_r0), -rel.dot(_u0));
 
     const vel = ctx.rider.body.linvel();
-    const v = new THREE.Vector3(vel.x, vel.y, vel.z);
-    const along = v.dot(smp.tangent);
+    _pos.set(vel.x, vel.y, vel.z); // borrow scratch for velocity
+    const along = _pos.dot(smp.tangent);
     const sign = along >= 0 ? 1 : -1;
     this.sSpeed = sign * Math.max(Math.abs(along), 6);
-    const dPhiDir = r0.clone().multiplyScalar(Math.cos(this.phi))
-      .addScaledVector(u0, Math.sin(this.phi));
-    this.phiSpeed = v.dot(dPhiDir) / Math.max(R - RIDE, 1);
+    _radial.copy(_r0).multiplyScalar(Math.cos(this.phi))
+      .addScaledVector(_u0, Math.sin(this.phi)); // dP/dφ direction
+    this.phiSpeed = _pos.dot(_radial) / Math.max(R - RIDE, 1);
 
     this.s = smp.s;
     this.engaged = true;
@@ -83,7 +98,7 @@ export class TubeMode implements RideMode {
     this.camBlend = 0;
     this.camStart.copy(ctx.chase.camera.position);
     this.camStartQ.copy(ctx.chase.camera.quaternion);
-    this.camUp.copy(u0);
+    this.camUp.copy(_u0);
     ctx.rider.clearAir();
     ctx.rider.toKinematic();
   }
@@ -127,23 +142,21 @@ export class TubeMode implements RideMode {
     const sEnd = ctx.track.samples[ctx.track.samples.length - 1].s;
     this.s = THREE.MathUtils.clamp(this.s, 1, sEnd - 1);
 
-    // drive the body to the constraint pose
+    // drive the body to the constraint pose (all scratch, no allocations)
     const f2 = ctx.track.frameAt(this.s);
-    const { r0, u0 } = TubeMode.frame0(f2.tangent);
+    TubeMode.frame0(f2.tangent);
     const R = f2.tubeR;
-    const center = f2.pos.clone().addScaledVector(u0, R);
-    const radial = r0.clone().multiplyScalar(Math.sin(this.phi))
-      .addScaledVector(u0, -Math.cos(this.phi)); // φ=0 → straight down to the floor
-    const pos = center.clone().addScaledVector(radial, R - RIDE);
-    const upB = radial.clone().negate(); // board up points at the axis
-    const fwd = f2.tangent.clone().multiplyScalar(sign);
-    fwd.addScaledVector(upB, -fwd.dot(upB)).normalize();
-    const back = fwd.clone().negate();
-    const xAxis = new THREE.Vector3().crossVectors(upB, back).normalize();
-    const q = new THREE.Quaternion().setFromRotationMatrix(
-      new THREE.Matrix4().makeBasis(xAxis, upB, back),
-    );
-    rider.driveKinematic(pos, q, Math.abs(this.sSpeed));
+    _center.copy(f2.pos).addScaledVector(_u0, R);
+    _radial.copy(_r0).multiplyScalar(Math.sin(this.phi))
+      .addScaledVector(_u0, -Math.cos(this.phi)); // φ=0 → straight down to the floor
+    _pos.copy(_center).addScaledVector(_radial, R - RIDE);
+    _upB.copy(_radial).negate(); // board up points at the axis
+    _fwd.copy(f2.tangent).multiplyScalar(sign);
+    _fwd.addScaledVector(_upB, -_fwd.dot(_upB)).normalize();
+    _back.copy(_fwd).negate();
+    _x.crossVectors(_upB, _back).normalize();
+    _qd.setFromRotationMatrix(_m.makeBasis(_x, _upB, _back));
+    rider.driveKinematic(_pos, _qd, Math.abs(this.sSpeed));
     rider.clearAir();
     rider.meterCharge(METER_GRIND * FIXED_DT); // riding the ceiling pays
     return null;
@@ -164,26 +177,26 @@ export class TubeMode implements RideMode {
       ctx.track.samples[ctx.track.samples.length - 1].s - 1,
     );
     const f = ctx.track.frameAt(backS);
-    const { r0, u0 } = TubeMode.frame0(f.tangent);
-    const axisPos = f.pos.clone().addScaledVector(u0, f.tubeR); // ON the axis
+    TubeMode.frame0(f.tangent);
+    _center.copy(f.pos).addScaledVector(_u0, f.tubeR); // axis position
 
     // roll: AXIS = world-locked (u0); RIDER = away from the rider, pinning
     // him to the bottom of the screen (inverted rider → inverted level)
-    const upTarget = this.camVariant === 'rider'
-      ? r0.clone().multiplyScalar(-Math.sin(this.phi)).addScaledVector(u0, Math.cos(this.phi))
-      : u0;
-    this.camUp.lerp(upTarget, 1 - Math.exp(-dt * 6));
-    if (this.camUp.lengthSq() < 1e-4) this.camUp.copy(r0); // 180° flip guard
+    if (this.camVariant === 'rider') {
+      _upT.copy(_r0).multiplyScalar(-Math.sin(this.phi)).addScaledVector(_u0, Math.cos(this.phi));
+    } else {
+      _upT.copy(_u0);
+    }
+    this.camUp.lerp(_upT, 1 - Math.exp(-dt * 6));
+    if (this.camUp.lengthSq() < 1e-4) this.camUp.copy(_r0); // 180° flip guard
     this.camUp.normalize();
 
-    const fwd = f.tangent.clone().multiplyScalar(sign);
-    const qT = new THREE.Quaternion().setFromRotationMatrix(
-      new THREE.Matrix4().lookAt(new THREE.Vector3(), fwd, this.camUp),
-    );
+    _fwd.copy(f.tangent).multiplyScalar(sign);
+    _qd.setFromRotationMatrix(_m.lookAt(_zero.set(0, 0, 0), _fwd, this.camUp));
 
     this.camBlend = Math.min(1, this.camBlend + dt * 2.5);
-    cam.position.copy(this.camStart.clone().lerp(axisPos, this.camBlend));
-    cam.quaternion.copy(this.camStartQ).slerp(qT, this.camBlend);
+    cam.position.copy(_pos.copy(this.camStart).lerp(_center, this.camBlend));
+    cam.quaternion.copy(this.camStartQ).slerp(_qd, this.camBlend);
     cam.up.copy(this.camUp);
     cam.fov += (74 - cam.fov) * (1 - Math.exp(-dt * 4));
     cam.updateProjectionMatrix();
