@@ -11,7 +11,7 @@ import { makeChromeMatcap } from './matcap';
 import { makeSky } from './sky';
 import { makeGrid, updateGrid } from './grid';
 import { buildTrack, updateTrack } from './track/builder';
-import { GAUNTLET_PLUS, LOOPER, PIPELINE } from './track/spec';
+import { GAUNTLET_PLUS, LOOPER, OUROBOROS, PIPELINE } from './track/spec';
 import { Rider } from './rider';
 import { ChaseCamera } from './camera';
 
@@ -35,12 +35,15 @@ export async function startGame(): Promise<void> {
   scene.add(makeSky());
   const grid = makeGrid();
   scene.add(grid);
-  // map select: ?map=gauntlet | ?map=looper; PIPELINE is the default
+  // map select: ?map=gauntlet | looper | pipeline; OUROBOROS (the circuit)
+  // is the default
   const mapParam = new URLSearchParams(location.search).get('map');
   const spec =
     mapParam === 'gauntlet' ? GAUNTLET_PLUS :
     mapParam === 'looper' ? LOOPER :
-    PIPELINE;
+    mapParam === 'pipeline' ? PIPELINE :
+    OUROBOROS;
+  const isCircuit = !!spec.circuit;
   const { track, mesh: trackMesh, rails } = buildTrack(scene, world, RAPIER, spec);
 
   const matcap = makeChromeMatcap();
@@ -58,6 +61,7 @@ export async function startGame(): Promise<void> {
   let runStart: number | null = null;
   let lastMs: number | null = null;
   let bestMs: number | null = null;
+  let lapCount = 0;
   let onBoostPad = false;
   let camRadiusClamp = 0; // tighten the chase orbit inside tubes
   const riderTrackInfo = {
@@ -94,14 +98,29 @@ export async function startGame(): Promise<void> {
         checkpointS = smp.s;
       }
       // timing gates
-      if (prevS < track.spec.start && progressS >= track.spec.start) {
-        runStart = performance.now();
-        lastMs = null;
-      }
-      if (runStart !== null && prevS < track.spec.finish && progressS >= track.spec.finish) {
-        lastMs = performance.now() - runStart;
-        if (bestMs === null || lastMs < bestMs) bestMs = lastMs;
-        runStart = null;
+      if (isCircuit) {
+        // the lap line: first crossing starts lap 1; each later crossing
+        // banks a lap and restarts the clock (|Δs| guard skips the wrap
+        // jump and respawn teleports)
+        if (prevS < spec.start && progressS >= spec.start && Math.abs(progressS - prevS) < 30) {
+          const now = performance.now();
+          if (runStart !== null) {
+            lastMs = now - runStart;
+            if (bestMs === null || lastMs < bestMs) bestMs = lastMs;
+            lapCount++;
+          }
+          runStart = now;
+        }
+      } else {
+        if (prevS < track.spec.start && progressS >= track.spec.start) {
+          runStart = performance.now();
+          lastMs = null;
+        }
+        if (runStart !== null && prevS < track.spec.finish && progressS >= track.spec.finish) {
+          lastMs = performance.now() - runStart;
+          if (bestMs === null || lastMs < bestMs) bestMs = lastMs;
+          runStart = null;
+        }
       }
       // boost pad trigger
       const lateral = _diff.copy(pos).sub(smp.pos).dot(smp.right);
@@ -132,6 +151,7 @@ export async function startGame(): Promise<void> {
       checkpointS = SPAWN_S;
       runStart = null;
       lastMs = null;
+      lapCount = 0;
     }
   }
 
@@ -305,7 +325,16 @@ export async function startGame(): Promise<void> {
       clearTimeout(trickTimer);
       trickTimer = setTimeout(() => { trickEl.className = ''; }, 1500);
     }
-    if (runStart !== null) {
+    if (isCircuit) {
+      if (runStart !== null) {
+        const clock = paused ? pauseStart : performance.now();
+        timeEl.textContent = `LAP ${lapCount + 1} · ${fmt(clock - runStart)}`
+          + (lastMs !== null ? `  LAST ${fmt(lastMs)}` : '')
+          + (bestMs !== null ? `  BEST ${fmt(bestMs)}` : '');
+      } else {
+        timeEl.textContent = 'CROSS THE LINE TO START LAP 1';
+      }
+    } else if (runStart !== null) {
       const clock = paused ? pauseStart : performance.now();
       timeEl.textContent = `TIME ${fmt(clock - runStart)}${bestMs !== null ? '  BEST ' + fmt(bestMs) : ''}`;
     } else if (lastMs !== null) {

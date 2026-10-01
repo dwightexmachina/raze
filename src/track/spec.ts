@@ -40,8 +40,12 @@ export interface TrackSpec {
   name: string;
   width: number;
   baseY: number;     // deck height above the void grid
-  start: number;     // start-line arclength (timer begins)
-  finish: number;    // finish-line arclength (timer ends)
+  start: number;     // start-line arclength (timer begins; lap line on circuits)
+  finish: number;    // finish-line arclength (ignored on circuits)
+  /** Closed course: the spline must return to its start pose (equal
+   *  opposing straights + arcs summing to 360°, elevation net zero).
+   *  The seam is welded, progress wraps, and timing becomes laps. */
+  circuit?: boolean;
   segments: Segment[];
   attachments: Attachment[];
 }
@@ -149,5 +153,53 @@ export const LOOPER: TrackSpec = {
   ],
   attachments: [
     { kind: 'boost', at: 26, length: 10 },
+  ],
+};
+
+/** The everything circuit: a 1.23 km stadium lap — two equal 380 m
+ *  straights joined by two 180° banked hairpins (closes exactly by
+ *  construction) — carrying every feature in the game. CCW. */
+export const OUROBOROS: TrackSpec = {
+  name: 'OUROBOROS',
+  width: 16,
+  baseY: 8,
+  start: 8,
+  finish: 8,
+  circuit: true,
+  segments: [
+    // ---- front straight (380 m) ----
+    { kind: 'straight', length: 40, label: 'start/finish' },                      //    0-  40
+    { kind: 'hill', length: 50, height: 2.5, label: 'crest' },                    //   40-  90
+    { kind: 'hill', length: 34, height: -1.5, label: 'dip' },                     //   90- 124
+    { kind: 'straight', length: 60, label: 'pylon slalom' },                      //  124- 184
+    { kind: 'ramp', length: 18, rise: 3, label: 'kicker' },                       //  184- 202
+    { kind: 'gap', length: 14, label: 'void gap 1' },                             //  202- 216
+    { kind: 'straight', length: 60, label: 'landing + rail' },                    //  216- 276
+    { kind: 'straight', length: 34, label: 'pinch gate' },                        //  276- 310
+    { kind: 'straight', length: 70, label: 'run-up A' },                          //  310- 380
+    { kind: 'arc', radius: 75, angle: 180, roll: 24, label: 'banked hairpin A' }, //  380- 616
+    // ---- back straight (380 m) ----
+    { kind: 'straight', length: 50, wallR: 7, label: 'wall alley' },              //  616- 666
+    { kind: 'straight', length: 20, label: 'wall release' },                      //  666- 686
+    { kind: 'straight', length: 70, wallL: 6, wallR: 6, label: 'half-pipe' },     //  686- 756
+    { kind: 'straight', length: 24, label: 'pipe exit' },                         //  756- 780
+    { kind: 'straight', length: 20, tube: 7, label: 'tube mouth' },               //  780- 800
+    { kind: 'straight', length: 70, tube: 7, twist: 360, label: 'corkscrew' },    //  800- 870
+    { kind: 'straight', length: 30, label: 'tube exit' },                         //  870- 900
+    { kind: 'ramp', length: 24, rise: 5, label: 'big air' },                      //  900- 924
+    { kind: 'gap', length: 22, label: 'void gap 2' },                             //  924- 946
+    { kind: 'straight', length: 50, label: 'landing B' },                         //  946- 996
+    { kind: 'arc', radius: 75, angle: 180, roll: 24, label: 'banked hairpin B' }, //  996-1231
+  ],
+  attachments: [
+    { kind: 'boost', at: 20, length: 10 },
+    { kind: 'pylon', at: 134, offset: -3.5 },
+    { kind: 'pylon', at: 148, offset: 3.5 },
+    { kind: 'pylon', at: 162, offset: -3.5 },
+    { kind: 'pylon', at: 176, offset: 3.5 },
+    { kind: 'rail', at: 224, length: 34, offset: 5, height: 0.8 },   // landing grind
+    { kind: 'gate', at: 292, opening: 7 },
+    { kind: 'rail', at: 700, length: 40, offset: -8, height: 6.4 },  // half-pipe lip
+    { kind: 'boost', at: 958, length: 10 },
   ],
 };

@@ -161,6 +161,29 @@ export class Track {
     for (const att of this.spec.attachments) {
       if (att.kind === 'boost') this.boostZones.push({ from: att.at, to: att.at + att.length });
     }
+
+    // circuit: snap the seam exactly and give both end samples wrap-aware
+    // frames so the loop is seamless in geometry and in physics
+    if (spec.circuit && this.samples.length > 3) {
+      const N = this.samples.length;
+      const first = this.samples[0];
+      const last = this.samples[N - 1];
+      last.pos.copy(first.pos);
+      const t = new THREE.Vector3()
+        .subVectors(this.samples[1].pos, this.samples[N - 2].pos)
+        .normalize();
+      const r0 = new THREE.Vector3().crossVectors(t, new THREE.Vector3(0, 1, 0)).normalize();
+      const u0 = new THREE.Vector3().crossVectors(r0, t).normalize();
+      for (const smp of [first, last]) {
+        smp.tangent.copy(t);
+        smp.right.copy(r0); // roll/walls/tube are all zero at the seam
+        smp.up.copy(u0);
+      }
+    }
+  }
+
+  get totalS(): number {
+    return this.samples[this.samples.length - 1].s;
   }
 
   frameAt(s: number): TrackSample {
@@ -172,14 +195,24 @@ export class Track {
     return this.samples[lo];
   }
 
-  /** Nearest sample to a world position, searching around a hint index. */
+  /** Nearest sample to a world position, searching around a hint index.
+   *  On circuits the search window wraps across the seam. */
   nearest(pos: THREE.Vector3, hintIdx: number): { idx: number; dist: number } {
-    const lo = Math.max(0, hintIdx - 60);
-    const hi = Math.min(this.samples.length - 1, hintIdx + 60);
+    const N = this.samples.length;
     let best = hintIdx, bestD = Infinity;
-    for (let i = lo; i <= hi; i++) {
-      const d = this.samples[i].pos.distanceToSquared(pos);
-      if (d < bestD) { bestD = d; best = i; }
+    if (this.spec.circuit) {
+      for (let k = -60; k <= 60; k++) {
+        const i = (((hintIdx + k) % N) + N) % N;
+        const d = this.samples[i].pos.distanceToSquared(pos);
+        if (d < bestD) { bestD = d; best = i; }
+      }
+    } else {
+      const lo = Math.max(0, hintIdx - 60);
+      const hi = Math.min(N - 1, hintIdx + 60);
+      for (let i = lo; i <= hi; i++) {
+        const d = this.samples[i].pos.distanceToSquared(pos);
+        if (d < bestD) { bestD = d; best = i; }
+      }
     }
     return { idx: best, dist: Math.sqrt(bestD) };
   }
@@ -239,7 +272,10 @@ export function buildTrack(
   const uvs: number[] = [];
   const indices: number[] = [];
   const Y = new THREE.Vector3(0, 1, 0);
-  for (let i = 0; i < S.length; i++) {
+  // circuits: drop the duplicate seam ring and weld the last strip to
+  // ring 0 — a zero-width crack at the lap line would catch the board
+  const ringCount = spec.circuit ? S.length - 1 : S.length;
+  for (let i = 0; i < ringCount; i++) {
     const smp = S[i];
     const r0 = new THREE.Vector3().crossVectors(smp.tangent, Y).normalize();
     const u0 = new THREE.Vector3().crossVectors(r0, smp.tangent).normalize();
@@ -264,6 +300,13 @@ export function buildTrack(
       for (let j = 0; j < ACROSS - 1; j++) {
         indices.push(prev + j, prev + j + 1, row + j, prev + j + 1, row + j + 1, row + j);
       }
+    }
+  }
+
+  if (spec.circuit && S[0].surfaced && S[ringCount - 1].surfaced) {
+    const prev = (ringCount - 1) * ACROSS;
+    for (let j = 0; j < ACROSS - 1; j++) {
+      indices.push(prev + j, prev + j + 1, j, prev + j + 1, j + 1, j);
     }
   }
 
@@ -353,9 +396,9 @@ export function buildTrack(
     );
   }
 
-  // ---- start / finish gates ----
+  // ---- start / finish gates (circuits have one combined lap line) ----
   addGateBar(scene, track, spec.start, new THREE.Color(0.2, 1.8, 2.0));
-  addGateBar(scene, track, spec.finish, new THREE.Color(2.0, 0.4, 1.1));
+  if (!spec.circuit) addGateBar(scene, track, spec.finish, new THREE.Color(2.0, 0.4, 1.1));
 
   // ---- attachments ----
   const rails: RailLine[] = [];
