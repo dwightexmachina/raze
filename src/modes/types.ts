@@ -29,6 +29,8 @@ export interface RideMode {
   enter(ctx: ModeContext): void;
   step(ctx: ModeContext, padBoost: boolean): ModeName | null;
   updateCamera(ctx: ModeContext, dt: number): void;
+  /** Optional: cycle between the mode's own camera variants (V key). */
+  cycleCamera?(): void;
   /** Idempotent: restore anything hijacked (called on forced resets). */
   exit(ctx: ModeContext): void;
 }

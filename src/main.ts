@@ -193,7 +193,10 @@ async function boot(): Promise<void> {
 
   window.addEventListener('keydown', (e) => {
     if (e.code === 'KeyC') chase.resetOffsets();
-    if (e.code === 'KeyV' && !coordinator.cameraOverridden) chase.cycleMode();
+    if (e.code === 'KeyV') {
+      if (coordinator.cameraOverridden) coordinator.cycleCameraVariant();
+      else chase.cycleMode();
+    }
     if (e.code === 'KeyP') togglePause();
   });
 

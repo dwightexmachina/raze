@@ -66,6 +66,11 @@ export class ModeCoordinator {
     }
   }
 
+  /** V key: cycle the active mode's own camera variants, if it has any. */
+  cycleCameraVariant(): void {
+    this.active.cycleCamera?.();
+  }
+
   /** Per-render-frame camera hook. Returns true if the mode drove the camera. */
   frameCamera(dt: number): boolean {
     if (!this.active.overridesCamera) return false;

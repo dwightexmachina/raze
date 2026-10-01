@@ -25,8 +25,20 @@ const Y = new THREE.Vector3(0, 1, 0);
  * right-side-up, then control returns to HOVER.
  */
 export class TubeMode implements RideMode {
-  readonly name = 'TUBE';
   readonly overridesCamera = true;
+
+  /** AXIS: roll locked to the world (stable horizon). RIDER: camera rolls
+   *  so the rider is always at the bottom of the screen — inverted rider
+   *  means the whole level renders upside down. V toggles. */
+  private camVariant: 'axis' | 'rider' = 'axis';
+
+  get name(): string {
+    return this.camVariant === 'rider' ? 'TUBE·RIDER' : 'TUBE·AXIS';
+  }
+
+  cycleCamera(): void {
+    this.camVariant = this.camVariant === 'axis' ? 'rider' : 'axis';
+  }
 
   /** Set by the coordinator before switching: nearest-sample index. */
   pendingIdx = 0;
@@ -39,6 +51,7 @@ export class TubeMode implements RideMode {
   private camBlend = 0;
   private camStart = new THREE.Vector3();
   private camStartQ = new THREE.Quaternion();
+  private camUp = new THREE.Vector3(0, 1, 0); // smoothed roll-up vector
 
   private static frame0(tangent: THREE.Vector3): { r0: THREE.Vector3; u0: THREE.Vector3 } {
     const r0 = new THREE.Vector3().crossVectors(tangent, Y).normalize();
@@ -68,6 +81,7 @@ export class TubeMode implements RideMode {
     this.camBlend = 0;
     this.camStart.copy(ctx.chase.camera.position);
     this.camStartQ.copy(ctx.chase.camera.quaternion);
+    this.camUp.copy(u0);
     ctx.rider.clearAir();
     ctx.rider.toKinematic();
   }
@@ -148,18 +162,27 @@ export class TubeMode implements RideMode {
       ctx.track.samples[ctx.track.samples.length - 1].s - 1,
     );
     const f = ctx.track.frameAt(backS);
-    const { u0 } = TubeMode.frame0(f.tangent);
+    const { r0, u0 } = TubeMode.frame0(f.tangent);
     const axisPos = f.pos.clone().addScaledVector(u0, f.tubeR); // ON the axis
+
+    // roll: AXIS = world-locked (u0); RIDER = away from the rider, pinning
+    // him to the bottom of the screen (inverted rider → inverted level)
+    const upTarget = this.camVariant === 'rider'
+      ? r0.clone().multiplyScalar(-Math.sin(this.phi)).addScaledVector(u0, Math.cos(this.phi))
+      : u0;
+    this.camUp.lerp(upTarget, 1 - Math.exp(-dt * 6));
+    if (this.camUp.lengthSq() < 1e-4) this.camUp.copy(r0); // 180° flip guard
+    this.camUp.normalize();
 
     const fwd = f.tangent.clone().multiplyScalar(sign);
     const qT = new THREE.Quaternion().setFromRotationMatrix(
-      new THREE.Matrix4().lookAt(new THREE.Vector3(), fwd, u0),
+      new THREE.Matrix4().lookAt(new THREE.Vector3(), fwd, this.camUp),
     );
 
     this.camBlend = Math.min(1, this.camBlend + dt * 2.5);
     cam.position.copy(this.camStart.clone().lerp(axisPos, this.camBlend));
     cam.quaternion.copy(this.camStartQ).slerp(qT, this.camBlend);
-    cam.up.copy(u0);
+    cam.up.copy(this.camUp);
     cam.fov += (74 - cam.fov) * (1 - Math.exp(-dt * 4));
     cam.updateProjectionMatrix();
   }
