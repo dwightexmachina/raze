@@ -274,6 +274,17 @@ export async function startGame(): Promise<void> {
     }
   }
 
+  // ---- pose preview (number keys): freezes physics and poses the Herald
+  // by hand so motions can be eyeballed before they're wired to real
+  // physics triggers. 0 (or the digit of the currently-active pose)
+  // exits back to the normal rest stance / live control. ----
+  const poseEl = document.getElementById('pose')!;
+  function updatePoseHud(): void {
+    const info = rider.debugPoseInfo;
+    poseEl.textContent = info.index === 0 ? '' : `POSE PREVIEW: ${info.name} · PRESS 0 TO EXIT`;
+    poseEl.classList.toggle('on', info.index !== 0);
+  }
+
   window.addEventListener('keydown', (e) => {
     if (e.code === 'KeyC') chase.resetOffsets();
     if (e.code === 'KeyV') {
@@ -283,9 +294,13 @@ export async function startGame(): Promise<void> {
     if (e.code === 'KeyP') togglePause();
   });
 
-  // debug handle for tuning + headless stepping from the console
+  // debug handle for tuning + headless stepping from the console. render()
+  // forces a repaint without going through rAF — background/hidden tabs
+  // (as under automated browser control) suspend rAF entirely, so this is
+  // the only way to see a visual change take effect in that situation.
   (window as unknown as { __raze: object }).__raze = {
     chase, rider, track, world, input, coordinator, trackLogic, riderTrackInfo,
+    render: () => composer.render(),
   };
 
   // ---- camera metadata panel + clipboard copy ----
@@ -351,7 +366,15 @@ export async function startGame(): Promise<void> {
     const dt = Math.min((now - last) / 1000, 0.1);
     last = now;
 
-    if (!paused) {
+    const digit = input.consumeDigit();
+    if (digit !== null) {
+      // pressing the already-active pose's digit exits back to rest (0)
+      rider.setDebugPose(digit === rider.debugPoseInfo.index ? 0 : digit);
+      updatePoseHud();
+    }
+    const posePreview = rider.debugPoseInfo.index !== 0;
+
+    if (!paused && !posePreview) {
       accumulator += dt;
       trackLogic();
       while (accumulator >= FIXED_DT) {
@@ -364,7 +387,7 @@ export async function startGame(): Promise<void> {
       accumulator = 0;
     }
 
-    rider.syncVisual(input);
+    rider.syncVisual(input, dt, coordinator.modeName);
     if (!coordinator.frameCamera(dt)) {
       chase.update(
         dt, rider.position, rider.heading, rider.speed,

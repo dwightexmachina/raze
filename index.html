@@ -140,6 +140,17 @@
       font-family: "SF Mono", ui-monospace, Menlo, monospace;
       font-size: 15px; letter-spacing: 0.3em; color: #edeef4;
     }
+    #pose {
+      position: fixed; left: 50%; top: 14px;
+      transform: translateX(-50%);
+      font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+      font-size: 12px; letter-spacing: 0.18em; color: #0d0524;
+      background: #ff2e88; border-radius: 4px; padding: 6px 14px;
+      text-shadow: none; box-shadow: 0 0 16px rgba(255, 46, 136, 0.6);
+      opacity: 0; transition: opacity 0.2s;
+      pointer-events: none; user-select: none; white-space: nowrap;
+    }
+    #pose.on { opacity: 1; }
   </style>
 </head>
 <body>
@@ -155,10 +166,12 @@
     <b>SHIFT</b> boost (meter) · <b>SPACE</b> jump / hold = grab<br />
     <b>DRAG</b> orbit · <b>WHEEL</b> zoom<br />
     <b>V</b> cam mode · <b>C</b> reset cam<br />
-    <b>P</b> pause · <b>R</b> reset rider
+    <b>P</b> pause · <b>R</b> reset rider<br />
+    <b>1-7</b> pose preview · <b>0</b> exit preview
   </div>
   <div id="paused"><div><span>PAUSED</span><small>P TO RESUME · CAMERA STILL LIVE</small></div></div>
   <div id="trick"></div>
+  <div id="pose"></div>
   <div id="campanel">
     <h4>CAMERA</h4>
     <pre id="cammeta">--</pre>

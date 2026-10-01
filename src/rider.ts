@@ -56,6 +56,115 @@ export interface TrickEvent {
   quality: 'CLEAN' | 'SKETCHY' | 'BAIL';
 }
 
+interface LimbTarget { rot: [number, number, number]; pos: [number, number, number] }
+interface Pose {
+  legL: LimbTarget; legR: LimbTarget; torso: LimbTarget;
+  armL: LimbTarget; armR: LimbTarget; head: LimbTarget;
+  /** Continuous life layered on top of the held pose — never truly still.
+   *  amp: vertical bob magnitude (m). rate: bob angular speed (rad/s). */
+  breath: { amp: number; rate: number };
+}
+export interface PoseInfo { index: number; name: string }
+
+// Debug pose preview (number keys 1-7, see Input.consumeDigit): poses the
+// Herald's limbs by hand so motions can be eyeballed before they're wired
+// to real physics triggers. 0 is the rest/default stance — same numbers
+// authored directly on each mesh below. All six parts always lerp toward
+// whichever pose is active (syncVisual), so later this table doubles as
+// the real per-state pose data once gameplay picks the index itself.
+export const POSE_NAMES = ['REST', 'IDLE', 'CARVE', 'ACCEL TUCK', 'AIR + GRAB', 'LANDING', 'GRIND', 'TUBE TUCK'];
+const POSES: Pose[] = [
+  { // 0 REST — matches the originally-authored surf stance
+    legL: { rot: [0.18, 0, 0], pos: [-0.12, 0.48, -0.45] },
+    legR: { rot: [-0.18, 0, 0], pos: [0.12, 0.48, 0.45] },
+    torso: { rot: [0.1, 0, 0], pos: [0, 1.15, 0] },
+    armL: { rot: [Math.PI / 2.4, 0, 0.3], pos: [-0.05, 1.32, -0.42] },
+    armR: { rot: [-Math.PI / 2.6, 0, -0.3], pos: [0.05, 1.28, 0.42] },
+    head: { rot: [0, 0, 0], pos: [0, 1.62, 0] },
+    breath: { amp: 0.03, rate: 1.8 },
+  },
+  { // 1 IDLE — relaxed, upright; slow deep breathing
+    legL: { rot: [0.08, 0, 0.05], pos: [-0.12, 0.48, -0.45] },
+    legR: { rot: [-0.08, 0, -0.05], pos: [0.12, 0.48, 0.45] },
+    torso: { rot: [0.03, 0, 0], pos: [0, 1.17, 0] },
+    armL: { rot: [0.65, 0, 0.2], pos: [-0.05, 1.28, -0.3] },
+    armR: { rot: [-0.65, 0, -0.2], pos: [0.05, 1.28, 0.3] },
+    head: { rot: [0, 0, 0], pos: [0, 1.62, 0] },
+    breath: { amp: 0.05, rate: 1.5 },
+  },
+  { // 2 CARVE — front knee deep, torso counter-rotates, trailing arm back,
+    // head looks into the turn (shown here banking left); quick tense bounce
+    legL: { rot: [0.5, 0.3, 0.15], pos: [-0.12, 0.42, -0.45] },
+    legR: { rot: [-0.1, 0.1, -0.05], pos: [0.12, 0.5, 0.45] },
+    torso: { rot: [0.15, -0.35, 0.25], pos: [0, 1.05, 0] },
+    armL: { rot: [1.1, 0, 0.6], pos: [-0.1, 1.3, -0.5] },
+    armR: { rot: [-1.4, 0, -0.5], pos: [0.15, 1.35, 0.5] },
+    head: { rot: [0, -0.4, 0], pos: [0, 1.6, 0] },
+    breath: { amp: 0.022, rate: 3.2 },
+  },
+  { // 3 ACCEL / BOOST TUCK — crouched forward, arms pulled in aero;
+    // tight fast tremor, like buffeting in the wind
+    legL: { rot: [0.45, 0, 0.05], pos: [-0.12, 0.4, -0.45] },
+    legR: { rot: [-0.45, 0, -0.05], pos: [0.12, 0.4, 0.45] },
+    torso: { rot: [0.55, 0, 0], pos: [0, 0.95, -0.05] },
+    armL: { rot: [0.3, 0, 0.15], pos: [-0.08, 1.1, -0.35] },
+    armR: { rot: [-0.3, 0, -0.15], pos: [0.08, 1.1, 0.35] },
+    head: { rot: [0.25, 0, 0], pos: [0, 1.55, -0.02] },
+    breath: { amp: 0.016, rate: 4.2 },
+  },
+  { // 4 AIR + GRAB — knees pulled up toward the board, one arm reaches
+    // down to grab the rail, the other thrown out for style/balance;
+    // slow weightless drift, no ground to settle against
+    legL: { rot: [1.1, 0, 0.1], pos: [-0.14, 0.75, -0.25] },
+    legR: { rot: [1.0, 0, -0.1], pos: [0.14, 0.75, 0.25] },
+    torso: { rot: [0.3, 0, 0], pos: [0, 1.3, 0] },
+    armL: { rot: [1.6, 0, 0.9], pos: [-0.15, 0.85, -0.35] },
+    armR: { rot: [-1.6, 0, -0.4], pos: [0.2, 1.5, 0.5] },
+    head: { rot: [-0.15, 0, 0], pos: [0, 1.6, 0] },
+    breath: { amp: 0.04, rate: 1.0 },
+  },
+  { // 5 LANDING — deep absorbing crouch; quick settling micro-bounce
+    legL: { rot: [0.65, 0, 0.08], pos: [-0.12, 0.32, -0.4] },
+    legR: { rot: [-0.65, 0, -0.08], pos: [0.12, 0.32, 0.4] },
+    torso: { rot: [0.25, 0, 0], pos: [0, 0.85, 0] },
+    armL: { rot: [0.9, 0, 0.4], pos: [-0.1, 1.05, -0.4] },
+    armR: { rot: [-0.9, 0, -0.4], pos: [0.1, 1.05, 0.4] },
+    head: { rot: [0.1, 0, 0], pos: [0, 1.5, 0] },
+    breath: { amp: 0.02, rate: 5.0 },
+  },
+  { // 6 GRIND — low balance stance, arms wide; visible side-to-side
+    // balance correction
+    legL: { rot: [0.35, 0, 0.25], pos: [-0.16, 0.42, -0.4] },
+    legR: { rot: [-0.35, 0, -0.25], pos: [0.16, 0.42, 0.4] },
+    torso: { rot: [0.12, 0, 0], pos: [0, 1.0, 0] },
+    armL: { rot: [1.45, 0, 0.75], pos: [-0.3, 1.3, -0.3] },
+    armR: { rot: [-1.45, 0, -0.75], pos: [0.3, 1.3, 0.3] },
+    head: { rot: [0, 0, 0], pos: [0, 1.62, 0] },
+    breath: { amp: 0.045, rate: 2.6 },
+  },
+  { // 7 TUBE TUCK — pulled in tight to hug the pipe; fast tight vibration
+    legL: { rot: [0.25, 0, -0.05], pos: [-0.06, 0.46, -0.4] },
+    legR: { rot: [-0.25, 0, 0.05], pos: [0.06, 0.46, 0.4] },
+    torso: { rot: [0.2, 0, 0], pos: [0, 1.05, 0] },
+    armL: { rot: [0.5, 0, 0.08], pos: [-0.04, 1.2, -0.3] },
+    armR: { rot: [-0.5, 0, -0.08], pos: [0.04, 1.2, 0.3] },
+    head: { rot: [0.05, 0, 0], pos: [0, 1.55, 0] },
+    breath: { amp: 0.018, rate: 5.6 },
+  },
+];
+
+function lerpLimb(
+  mesh: THREE.Mesh, target: LimbTarget, rate: number,
+  rotOffZ = 0, posOffY = 0,
+): void {
+  mesh.rotation.x += (target.rot[0] - mesh.rotation.x) * rate;
+  mesh.rotation.y += (target.rot[1] - mesh.rotation.y) * rate;
+  mesh.rotation.z += (target.rot[2] + rotOffZ - mesh.rotation.z) * rate;
+  mesh.position.x += (target.pos[0] - mesh.position.x) * rate;
+  mesh.position.y += (target.pos[1] + posOffY - mesh.position.y) * rate;
+  mesh.position.z += (target.pos[2] - mesh.position.z) * rate;
+}
+
 // Scratch pool — stepHover runs 60×/s; reusing these makes the hot path
 // allocation-free so the GC never gets fed (GC pauses = mid-carve hitches).
 const _q = new THREE.Quaternion();
@@ -89,6 +198,20 @@ export class Rider {
   private leanGroup = new THREE.Group();
   private jumpHeld = false;
   private ray: RAPIER_API.Ray;
+
+  // procedural limb pose (debug preview today; real gameplay states later)
+  private legL!: THREE.Mesh;
+  private legR!: THREE.Mesh;
+  private torso!: THREE.Mesh;
+  private armL!: THREE.Mesh;
+  private armR!: THREE.Mesh;
+  private head!: THREE.Mesh;
+  private debugPose = 0;
+  private lastActiveIndex = 0;
+  private idleClock = 0;
+  /** Counts down after a landing; while >0 the LANDING pose overrides
+   *  whatever the auto-pose logic would otherwise pick. */
+  private landingTimer = 0;
 
   // air/trick state
   private wasGrounded = true;
@@ -129,33 +252,35 @@ export class Rider {
     legL.position.set(-0.12, 0.48, -0.45);
     legL.rotation.x = 0.18;
     herald.add(legL);
+    this.legL = legL;
     const legR = new THREE.Mesh(legGeo, chrome);
     legR.position.set(0.12, 0.48, 0.45);
     legR.rotation.x = -0.18;
     herald.add(legR);
+    this.legR = legR;
     // torso
     const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.16, 0.5, 4, 12), chrome);
     torso.position.set(0, 1.15, 0);
     torso.rotation.x = 0.1;
     herald.add(torso);
+    this.torso = torso;
     // arms out, surf stance
     const armGeo = new THREE.CapsuleGeometry(0.06, 0.5, 4, 8);
     const armL = new THREE.Mesh(armGeo, chrome);
     armL.position.set(-0.05, 1.32, -0.42);
     armL.rotation.set(Math.PI / 2.4, 0, 0.3);
     herald.add(armL);
+    this.armL = armL;
     const armR = new THREE.Mesh(armGeo, chrome);
     armR.position.set(0.05, 1.28, 0.42);
     armR.rotation.set(-Math.PI / 2.6, 0, -0.3);
     herald.add(armR);
-    // Helm head: sphere + swept cone fin trailing aft (+Z is the tail)
+    this.armR = armR;
+    // Helm head
     const head = new THREE.Mesh(new THREE.SphereGeometry(0.15, 16, 12), chrome);
     head.position.set(0, 1.62, 0);
     herald.add(head);
-    const crest = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.42, 10), chrome);
-    crest.rotation.x = Math.PI / 2 + 0.25; // sweep back and slightly up
-    crest.position.set(0, 1.66, 0.22);
-    herald.add(crest);
+    this.head = head;
     this.leanGroup.add(herald);
 
     // ---- cyan underglow sprite ----
@@ -213,6 +338,22 @@ export class Rider {
     const t = this.pendingTrick;
     this.pendingTrick = null;
     return t;
+  }
+
+  /** Debug pose preview (number keys): 0 = normal rest stance, 1-7 =
+   *  POSE_NAMES. Caller is expected to freeze physics while non-zero. */
+  setDebugPose(index: number): void {
+    this.debugPose = Math.max(0, Math.min(POSES.length - 1, index));
+  }
+
+  /** The pose actually being shown right now — the debug override if one
+   *  is active, otherwise whatever auto-pose syncVisual last picked. */
+  get activePoseInfo(): PoseInfo {
+    return { index: this.lastActiveIndex, name: POSE_NAMES[this.lastActiveIndex] };
+  }
+
+  get debugPoseInfo(): PoseInfo {
+    return { index: this.debugPose, name: POSE_NAMES[this.debugPose] };
   }
 
   // ---------- primitives for Ride Modes ----------
@@ -415,6 +556,7 @@ export class Rider {
       }
     } else if (!this.wasGrounded) {
       this.settleAir(false, _fwd, _v, av.y); // settleAir reads these synchronously
+      this.landingTimer = 0.3;
     }
     this.wasGrounded = this.grounded;
   }
@@ -474,8 +616,22 @@ export class Rider {
     this.grabActive = false;
   }
 
-  /** Sync visuals to physics, add carve lean. */
-  syncVisual(input: Input): void {
+  /** Picks the pose that matches current physics/ride-mode state. Only
+   *  consulted when no debug pose override is active. */
+  private autoPose(input: Input, mode: string): number {
+    if (this.landingTimer > 0) return 5;      // LANDING: just touched down
+    if (mode === 'GRIND') return 6;           // GRIND: balance stance
+    if (mode === 'TUBE') return 7;            // TUBE TUCK: hugging the pipe
+    if (!this.grounded) return 4;             // AIR + GRAB
+    if (this.speed < 3) return 1;             // IDLE: stopped or crawling
+    if (input.steer !== 0 && this.speed > 8) return 2;  // CARVE: cornering at speed
+    if (input.thrust > 0) return 3;           // ACCEL TUCK: pushing forward
+    return 0;                                 // REST: coasting, no input
+  }
+
+  /** Sync visuals to physics, add carve lean, and lerp limbs toward
+   *  whichever pose fits the current ride state (or the debug override). */
+  syncVisual(input: Input, dt = FIXED_DT, mode = 'HOVER'): void {
     const pos = this.body.translation();
     const rot = this.body.rotation();
     this.group.position.set(pos.x, pos.y, pos.z);
@@ -486,6 +642,31 @@ export class Rider {
     this.leanGroup.rotation.z += (targetLean - this.leanGroup.rotation.z) * 0.12;
     const targetTuck = this.grabActive ? -0.32 : 0;
     this.leanGroup.rotation.x += (targetTuck - this.leanGroup.rotation.x) * 0.15;
+
+    this.landingTimer = Math.max(0, this.landingTimer - dt);
+
+    // limb pose: always lerping toward the active pose's targets, plus a
+    // continuous breathing bob + sway so the body is never fully still —
+    // torso/head/arms rise and fall together, arms sway gently out of
+    // phase (reads as balance correction), legs alternate a faint knee
+    // flex (weight shifting foot to foot) rather than bobbing in lockstep.
+    const activeIndex = this.debugPose !== 0 ? this.debugPose : this.autoPose(input, mode);
+    this.lastActiveIndex = activeIndex;
+    const pose = POSES[activeIndex];
+    const rate = 0.12;
+    this.idleClock += dt;
+    const b = pose.breath;
+    const bob = Math.sin(this.idleClock * b.rate) * b.amp;
+    const sway = Math.cos(this.idleClock * b.rate * 0.55 + 1.1) * b.amp * 0.5;
+
+    lerpLimb(this.torso, pose.torso, rate, sway * 0.5, bob);
+    lerpLimb(this.head, pose.head, rate, 0, bob * 0.7);
+    lerpLimb(this.armL, pose.armL, rate, sway * 0.3, bob * 0.8);
+    lerpLimb(this.armR, pose.armR, rate, -sway * 0.3, bob * 0.8);
+    lerpLimb(this.legL, pose.legL, rate);
+    lerpLimb(this.legR, pose.legR, rate);
+    this.legL.rotation.x += bob * 0.4;
+    this.legR.rotation.x -= bob * 0.4;
   }
 
   get position(): THREE.Vector3 {
